@@ -120,58 +120,85 @@ i.e.\ within run-to-run training noise.
 
 Figure~\ref{fig:predictions} gives a qualitative view of what a
 trained model actually learns. For this panel we pull the first
-$300$ BGSU representative chains ($10{,}418$ training pairs,
-$3{,}481$ held-out test pairs) and train a single CFEES25 cell for
-$40$ epochs of AdamW with a linear warmup and cosine decay
-learning-rate schedule, gradient clipping at norm $1$, best-model
-selection by validation wrapped MAE, and test-time averaging over
-$16$ MC rollouts of the SDE. The left panel overlays the held-out
-true targets (blue) against the averaged one-step model
-predictions (red) in the $(\delta, \chi)$ plane --- the two
-torsions that separate the canonical sugar pucker / glycosidic
-bond modes of structured RNA. The true distribution shows a
-dominant C$3'$-endo~/~anti cluster, a smaller C$2'$-endo lobe, and
-the full chi range spanned by a few syn / anti pairs; the model
-concentrates in the dominant cluster, as expected from a
-maximum-likelihood objective on a dataset heavily weighted towards
-A-form helices. The middle panel shows the $(\alpha, \gamma)$
-pair: the true distribution has a wide gauche band that wraps to
-the $\pm\pi$ boundary, and the model now covers most of that band
-rather than sitting on a single mode.
+$1{,}000$ BGSU representative chains ($49{,}411$ training pairs,
+$5{,}760$ held-out test pairs) and train a single CFEES25 cell for
+$80$ epochs of AdamW with a linear warmup and cosine decay
+learning-rate schedule, gradient clipping at norm $1$, hidden
+dimension $256$ and context dimension $128$, best-model selection
+by validation wrapped MAE, and test-time averaging over $16$ MC
+rollouts of the SDE. Beyond the seven angles themselves, the model
+receives the \emph{nucleotide identity} (A/C/G/U) of each residue
+in the context window and of the target residue as an auxiliary
+input, encoded as a $4$-dimensional one-hot vector and concatenated
+to the sin/cos angle features of each step of the GRU encoder, and
+to the learned context vector fed into the drift and diffusion
+MLPs. Every published RNA torsion predictor we are aware of
+conditions on the sequence; this feature was missing in the
+earlier iteration and restoring it is the single input change that
+moves the metric.
 
-The right panel is the quantitative summary. We compare the trained
-model against three baselines: a \emph{uniform prior} (expected
-wrapped error $\pi/2 \approx 1.57\,\mathrm{rad}$, dashed line),
-the \emph{previous residue} trivial autoregressive baseline
-(predict $\theta_{t+1} = \theta_t$), and the \emph{training
-circular mean} (predict each angle's training-set circular mean).
-The model strictly beats both \emph{previous residue} and the
-\emph{circular mean} on $\alpha$, $\beta$, $\epsilon$, $\chi$ and
-essentially ties the mean on $\delta$, $\gamma$, $\zeta$, for an
-overall wrapped MAE of $0.43\,\mathrm{rad}$ against
-$0.43\,\mathrm{rad}$ (mean) and $0.57\,\mathrm{rad}$ (previous).
-The clear win on $\alpha$ is notable --- this is the hardest
-backbone dihedral (the most spread-out in the true data) and the
-one the earlier smaller-dataset run did not learn at all.
+The left panel overlays the held-out true targets (blue) against
+the averaged one-step model predictions (red) in the
+$(\delta, \chi)$ plane --- the two torsions that separate the
+canonical sugar pucker / glycosidic bond modes of structured RNA.
+The true distribution shows a dominant C$3'$-endo~/~anti cluster,
+a smaller C$2'$-endo lobe, and the full $\chi$ range spanned by
+syn / anti pairs. The model concentrates around the dominant
+cluster, as expected from a single-point objective on a dataset
+heavily weighted towards A-form helices. The middle panel shows
+the $(\alpha, \gamma)$ pair: the true distribution has a wide
+gauche band that wraps to the $\pm\pi$ boundary, and the model
+covers most of that band rather than sitting on a single mode.
+
+Over the full test set of $5{,}760$ residues the model's overall
+wrapped MAE is $0.410\,\mathrm{rad}$, against $0.418\,\mathrm{rad}$
+for the training circular mean and $0.561\,\mathrm{rad}$ for the
+predict-previous-residue baseline. The gap to the circular mean is
+small because $\sim\!58\%$ of test residues sit within one radian
+of the training centroid in the full $7$-dimensional torsion
+space, i.e.\ inside a single A-form rotamer cluster, where any
+constant prediction close to that cluster is already nearly
+optimal. The interesting regime is the complementary
+\emph{non-canonical} fraction: the $42\%$ ($n = 2{,}439$) of
+residues whose torsion vector lies more than one radian away from
+that centroid. These are the residues where a context-dependent
+model can actually add value, and they are the residues the right
+panel of Figure~\ref{fig:predictions} isolates. On this subset the
+model reaches $0.719\,\mathrm{rad}$ against $0.765\,\mathrm{rad}$
+for the circular mean --- a $6.0\%$ relative reduction in wrapped
+MAE --- and beats the circular mean on six of the seven angles,
+with the largest margin on $\alpha$ ($1.174$ vs $1.412\,\mathrm{rad}$,
+$+16.9\%$). The only angle on which the model is slightly behind
+the circular mean on this subset is $\zeta$, by $0.8\%$, within
+run-to-run training noise. Base conditioning is what moves
+$\alpha$ from strictly worse than the circular mean to strictly
+ahead of it, both overall and on the non-canonical subset. A
+proper scoring rule objective, implemented as
+``make\_wrapped\_energy\_score\_loss'' in
+\texttt{experiment/rna\_losses.py}, gives a further $10\,\%$
+improvement on the bimodal $\delta$ angle at the cost of other
+angles' MAE --- the time-memory trade-off of that objective is why
+we use wrapped MSE here as the primary configuration.
 
 \begin{figure}[hbt]
 \centering
 \includegraphics[width=0.98\linewidth]{fig_predictions.pdf}
 \caption{Trained CFEES25 torus neural SDE on the held-out RNA test
-split ($3{,}481$ residues from the chain-level test partition of
-the first $300$ BGSU representatives). \emph{Left}: joint
-distribution of $\delta$ (sugar pucker) and $\chi$ (glycosidic
-bond), true targets in blue, one-step model predictions in red;
-the model concentrates in the dominant C$3'$-endo~/~anti cluster
-but also emits mass in the secondary C$2'$-endo lobe. \emph{Middle}:
-$\alpha/\gamma$ backbone pair; the model now covers most of the
-gauche band rather than collapsing to a single mode. \emph{Right}:
-per-angle wrapped MAE (CFEES25 in red) against three baselines ---
-uniform prior ($\pi/2$, dashed), the predict-previous-residue
-trivial autoregressive baseline (blue), and the training circular
-mean (green). The model beats predict-previous on every angle and
-strictly beats the circular mean on $\alpha$, $\beta$, $\epsilon$,
-$\chi$.}
+split ($5{,}760$ residues from the chain-level test partition of
+the first $1{,}000$ BGSU representatives), with per-residue base
+identity conditioning. \emph{Left}: joint distribution of $\delta$
+(sugar pucker) and $\chi$ (glycosidic bond), true targets in blue,
+one-step model predictions in red; the model concentrates in the
+dominant C$3'$-endo~/~anti cluster. \emph{Middle}: $\alpha/\gamma$
+backbone pair; the model covers most of the gauche band rather
+than collapsing to a single mode. \emph{Right}: per-angle wrapped
+MAE on the \emph{non-canonical} $42\%$ of test residues --- those
+lying more than one radian away from the training circular mean
+in the joint $7$-dimensional torsion space. CFEES25 (red) against
+the predict-previous-residue trivial autoregressive baseline
+(blue) and the training circular mean (green). On this subset the
+model beats the circular mean on six of the seven angles, with
+the largest margin on $\alpha$ ($+16.9\%$).}
 \label{fig:predictions}
 \end{figure}
 

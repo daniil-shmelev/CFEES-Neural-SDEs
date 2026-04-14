@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Literal
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 from cyreal.datasets.dataset_protocol import DatasetProtocol
 from cyreal.datasets.utils import to_host_jax_array
@@ -24,6 +23,7 @@ from datasets.rna.download import (
 )
 from datasets.rna.preprocessing import (
     NUM_ANGLES,
+    NUM_BASES,
     compute_chain_torsions,
     load_chain_atoms,
     split_into_contiguous_runs,
@@ -31,14 +31,19 @@ from datasets.rna.preprocessing import (
 
 logger = logging.getLogger(__name__)
 
+# Bumped when the on-disk cache layout changes. Old caches are ignored.
+CACHE_LAYOUT_VERSION = "v2"
+
 
 @dataclass
 class RNATorsionDataset(DatasetProtocol):
     """One-step-ahead forecasting dataset on the n-torus.
 
     Each sample is a dict with:
-    - ``context_angles``: ``(context_length, 7 * residues_per_state)``
-    - ``target_angles``:  ``(7 * residues_per_state,)``
+    - ``context_angles``: ``(context_length, 7 * residues_per_state)`` float32
+    - ``context_bases``:  ``(context_length * residues_per_state,)`` int32 in 0..3
+    - ``target_angles``:  ``(7 * residues_per_state,)`` float32
+    - ``target_bases``:   ``(residues_per_state,)`` int32 in 0..3
 
     Splits are over chain identity (not residue index) so that no residue
     leaks between train/val/test.
@@ -86,35 +91,42 @@ class RNATorsionDataset(DatasetProtocol):
         else:
             split_ids = test_ids
 
-        contexts, targets = _build_pairs(
+        c_angles, c_bases, t_angles, t_bases = _build_pairs(
             {cid: chains[cid] for cid in split_ids},
             context_length=self.context_length,
             residues_per_state=self.residues_per_state,
         )
 
-        self._contexts = to_host_jax_array(contexts)
-        self._targets = to_host_jax_array(targets)
+        self._context_angles = to_host_jax_array(c_angles)
+        self._context_bases = to_host_jax_array(c_bases)
+        self._target_angles = to_host_jax_array(t_angles)
+        self._target_bases = to_host_jax_array(t_bases)
         self._num_angles = int(NUM_ANGLES * self.residues_per_state)
         self._n_chains = len(split_ids)
 
     def __len__(self) -> int:
-        return int(self._contexts.shape[0])
+        return int(self._context_angles.shape[0])
 
     def __getitem__(self, index: int) -> dict[str, jax.Array]:
         return {
-            "context_angles": self._contexts[index],
-            "target_angles": self._targets[index],
+            "context_angles": self._context_angles[index],
+            "context_bases": self._context_bases[index],
+            "target_angles": self._target_angles[index],
+            "target_bases": self._target_bases[index],
         }
 
     def as_array_dict(self) -> dict[str, jax.Array]:
         return {
-            "context_angles": self._contexts,
-            "target_angles": self._targets,
+            "context_angles": self._context_angles,
+            "context_bases": self._context_bases,
+            "target_angles": self._target_angles,
+            "target_bases": self._target_bases,
         }
 
     def metadata(self) -> dict[str, int]:
         return {
             "num_angles": self._num_angles,
+            "num_bases": NUM_BASES,
             "context_length": self.context_length,
             "residues_per_state": self.residues_per_state,
             "dataset_size": len(self),
@@ -153,48 +165,67 @@ def _chain_level_split(
 
 
 def _build_pairs(
-    chains: dict[str, list[np.ndarray]],
+    chains: dict[str, list[tuple[np.ndarray, np.ndarray]]],
     *,
     context_length: int,
     residues_per_state: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Build (context, target) pairs from per-chain valid runs.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build ``(context_angles, context_bases, target_angles, target_bases)``.
 
-    Each chain contributes a list of contiguous-residue runs. Within a run we
-    group every ``residues_per_state`` consecutive residues into one state of
-    shape ``(7 * residues_per_state,)``. We then slide a window of length
-    ``context_length`` over the resulting state sequence and emit one pair per
-    window position whose target state is the immediately following state.
+    Each chain contributes a list of contiguous-residue runs, where each run
+    is a ``(angles, base_ids)`` pair. Within a run we group every
+    ``residues_per_state`` consecutive residues into one state of shape
+    ``(7 * residues_per_state,)``. We slide a window of length
+    ``context_length`` over the resulting state sequence and emit one pair
+    per window position whose target state is the immediately following
+    state. Base identities flow through the same reshape / slide so each
+    state has ``residues_per_state`` bases attached.
     """
     state_dim = NUM_ANGLES * residues_per_state
-    contexts: list[np.ndarray] = []
-    targets: list[np.ndarray] = []
+    bases_per_state = residues_per_state
+    c_angles_chunks: list[np.ndarray] = []
+    c_bases_chunks: list[np.ndarray] = []
+    t_angles_chunks: list[np.ndarray] = []
+    t_bases_chunks: list[np.ndarray] = []
 
     for runs in chains.values():
-        for run in runs:
-            n_states = run.shape[0] // residues_per_state
+        for run_angles, run_bases in runs:
+            n_states = run_angles.shape[0] // residues_per_state
             if n_states <= context_length:
                 continue
             usable = n_states * residues_per_state
-            grouped = run[:usable].reshape(n_states, state_dim)
+            grouped_angles = run_angles[:usable].reshape(n_states, state_dim)
+            grouped_bases = run_bases[:usable].reshape(n_states, bases_per_state)
             num_pairs = n_states - context_length
             row_idx = np.arange(num_pairs)[:, None] + np.arange(context_length)[None, :]
-            contexts.append(grouped[row_idx])
-            targets.append(grouped[context_length : context_length + num_pairs])
+            c_angles_chunks.append(grouped_angles[row_idx])
+            c_bases_chunks.append(grouped_bases[row_idx])
+            t_angles_chunks.append(
+                grouped_angles[context_length : context_length + num_pairs]
+            )
+            t_bases_chunks.append(
+                grouped_bases[context_length : context_length + num_pairs]
+            )
 
-    if not contexts:
+    if not c_angles_chunks:
         return (
             np.zeros((0, context_length, state_dim), dtype=np.float32),
+            np.zeros((0, context_length, bases_per_state), dtype=np.int32),
             np.zeros((0, state_dim), dtype=np.float32),
+            np.zeros((0, bases_per_state), dtype=np.int32),
         )
-    return (
-        np.concatenate(contexts, axis=0).astype(np.float32),
-        np.concatenate(targets, axis=0).astype(np.float32),
-    )
+
+    c_angles = np.concatenate(c_angles_chunks, axis=0).astype(np.float32)
+    c_bases = np.concatenate(c_bases_chunks, axis=0).astype(np.int32)
+    t_angles = np.concatenate(t_angles_chunks, axis=0).astype(np.float32)
+    t_bases = np.concatenate(t_bases_chunks, axis=0).astype(np.int32)
+    return c_angles, c_bases, t_angles, t_bases
 
 
 def _cache_key(*, cutoff_angstrom: float, max_chains: int | None) -> str:
-    payload = f"cutoff={cutoff_angstrom}|max_chains={max_chains}"
+    payload = (
+        f"{CACHE_LAYOUT_VERSION}|cutoff={cutoff_angstrom}|max_chains={max_chains}"
+    )
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
@@ -205,11 +236,11 @@ def _load_or_build_chain_angles(
     cache_dir: Path,
     pdb_cache_dir: Path,
     min_chain_length: int,
-) -> dict[str, list[np.ndarray]]:
-    """Return ``{chain_token: [run_array, ...]}`` for valid contiguous runs."""
+) -> dict[str, list[tuple[np.ndarray, np.ndarray]]]:
+    """Return ``{chain_token: [(angles, base_ids), ...]}`` for valid runs."""
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / f"chain_angles_{_cache_key(cutoff_angstrom=cutoff_angstrom, max_chains=max_chains)}.npz"
-    chains: dict[str, list[np.ndarray]] = {}
+    chains: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {}
 
     if cache_path.exists():
         logger.info("Loading cached RNA torsion data from %s", cache_path)
@@ -221,11 +252,15 @@ def _load_or_build_chain_angles(
             token = sanitized.replace("__", "|")
             run_lengths = data[f"runs__{sanitized}"]
             angles = data[key]
+            bases = data[f"bases__{sanitized}"]
             offset = 0
-            runs: list[np.ndarray] = []
+            runs: list[tuple[np.ndarray, np.ndarray]] = []
             for length in run_lengths:
-                runs.append(angles[offset : offset + int(length)])
-                offset += int(length)
+                length = int(length)
+                runs.append(
+                    (angles[offset : offset + length], bases[offset : offset + length])
+                )
+                offset += length
             chains[token] = runs
         return chains
 
@@ -252,10 +287,14 @@ def _load_or_build_chain_angles(
         atoms = load_chain_atoms(path, chain_id, model=model)
         if atoms is None:
             continue
-        angles, res_ids = compute_chain_torsions(atoms)
+        angles, res_ids, base_ids = compute_chain_torsions(atoms)
         if len(angles) < min_chain_length:
             continue
-        runs = [r for r in split_into_contiguous_runs(angles, res_ids) if len(r) >= min_chain_length]
+        runs = [
+            (a, b)
+            for (a, b) in split_into_contiguous_runs(angles, res_ids, base_ids)
+            if len(a) >= min_chain_length
+        ]
         if not runs:
             continue
         chains[token] = runs
@@ -263,9 +302,13 @@ def _load_or_build_chain_angles(
     payload: dict[str, np.ndarray] = {}
     for token, runs in chains.items():
         sanitized = token.replace("|", "__")
-        all_angles = np.concatenate(runs, axis=0).astype(np.float32)
-        run_lengths = np.asarray([len(r) for r in runs], dtype=np.int64)
+        run_angles = [a for (a, _) in runs]
+        run_bases = [b for (_, b) in runs]
+        all_angles = np.concatenate(run_angles, axis=0).astype(np.float32)
+        all_bases = np.concatenate(run_bases, axis=0).astype(np.int8)
+        run_lengths = np.asarray([len(a) for a in run_angles], dtype=np.int64)
         payload[f"angles__{sanitized}"] = all_angles
+        payload[f"bases__{sanitized}"] = all_bases
         payload[f"runs__{sanitized}"] = run_lengths
 
     np.savez(cache_path, **payload)

@@ -15,11 +15,12 @@ import optax
 
 from datasets.rna.dataset import RNATorsionDataset
 from experiment.config import ExperimentConfig, Experiments, Solvers, load_config
-from experiment.factories import make_loader, make_model, make_prediction_fn
+from experiment.factories import make_loader, make_model
 from experiment.losses import LossFn, PyTree
 from experiment.rna_losses import (
     make_wrapped_mae_metric,
     make_wrapped_mse_loss,
+    rna_predict_batch,
     wrapped_angle_diff,
 )
 from experiment.runtime import make_output_dir, save_json
@@ -143,7 +144,6 @@ def evaluate(
 def predict_dataset(
     model: eqx.Module,
     *,
-    prediction_fn,
     config: ExperimentConfig,
     seed_offset: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -152,7 +152,7 @@ def predict_dataset(
 
     @eqx.filter_jit
     def predict_step(current_model, batch, key):
-        return prediction_fn(current_model, batch["context_angles"], key)
+        return rna_predict_batch(current_model, batch, key)
 
     key = jax.random.key(config.seed + seed_offset)
     key, loader_key = jax.random.split(key)
@@ -228,18 +228,9 @@ def main() -> int:
 
     model_key = jax.random.key(config.seed)
     model = make_model(config, metadata, model_key)
-    prediction_fn = make_prediction_fn()
 
-    loss_fn = make_wrapped_mse_loss(
-        input_key="context_angles",
-        target_key="target_angles",
-        prediction_fn=prediction_fn,
-    )
-    metric_fn = make_wrapped_mae_metric(
-        input_key="context_angles",
-        target_key="target_angles",
-        prediction_fn=prediction_fn,
-    )
+    loss_fn = make_wrapped_mse_loss()
+    metric_fn = make_wrapped_mae_metric()
 
     output_dir = args.output_dir or make_output_dir(model)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -271,7 +262,7 @@ def main() -> int:
 
     test_loss = evaluate(best_model, loss_fn=loss_fn, config=config, seed_offset=1)
     predicted, actual = predict_dataset(
-        best_model, prediction_fn=prediction_fn, config=config, seed_offset=2
+        best_model, config=config, seed_offset=2
     )
     test_mae = float(
         np.mean(np.abs(np.asarray(jax.device_get(

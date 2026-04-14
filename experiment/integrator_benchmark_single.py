@@ -56,10 +56,10 @@ def rss_mb() -> float:
     return psutil.Process().memory_info().rss / (1024**2)
 
 
-def _hlo_temp_bytes(grad_fn, model, context, key) -> int | None:
+def _hlo_temp_bytes(grad_fn, *args) -> int | None:
     """Compile the gradient graph once and read XLA's scratch buffer size."""
     try:
-        compiled = grad_fn.lower(model, context, key).compile()
+        compiled = grad_fn.lower(*args).compile()
         return int(compiled.compiled.memory_analysis().temp_size_in_bytes)
     except Exception:  # noqa: BLE001
         return None
@@ -101,29 +101,50 @@ def run(
         adjoint=build_adjoint(adjoint, n_steps),
         key=jax.random.key(0),
     )
-    context = jax.random.uniform(
+    context_angles = jax.random.uniform(
         jax.random.key(1),
         (batch_size, context_length, num_angles),
         minval=-jnp.pi,
         maxval=jnp.pi,
     )
-    jax.block_until_ready(context)
+    context_bases = jax.random.randint(
+        jax.random.key(2),
+        (batch_size, context_length, 1),
+        minval=0,
+        maxval=4,
+    )
+    target_bases = jax.random.randint(
+        jax.random.key(3), (batch_size, 1), minval=0, maxval=4
+    )
+    jax.block_until_ready(context_angles)
 
     gc.collect()
     rss_stage_b = rss_mb()  # model + data on device, pre-compile
 
-    def loss_fn(m: eqx.Module, ctx: jax.Array, k: jax.Array) -> jax.Array:
-        sample_keys = jax.random.split(k, ctx.shape[0])
-        preds = jax.vmap(lambda c, sk: m(c, sk))(ctx, sample_keys)
+    def loss_fn(
+        m: eqx.Module,
+        ctx_a: jax.Array,
+        ctx_b: jax.Array,
+        tgt_b: jax.Array,
+        k: jax.Array,
+    ) -> jax.Array:
+        sample_keys = jax.random.split(k, ctx_a.shape[0])
+        preds = jax.vmap(
+            lambda a, cb, tb, sk: m(a, cb, tb, sk)
+        )(ctx_a, ctx_b, tgt_b, sample_keys)
         return jnp.sum(preds**2)
 
     grad_fn = eqx.filter_jit(eqx.filter_value_and_grad(loss_fn))
     rep_keys = jax.random.split(jax.random.key(42), n_reps + 1)
 
-    temp_bytes = _hlo_temp_bytes(grad_fn, model, context, rep_keys[0])
+    temp_bytes = _hlo_temp_bytes(
+        grad_fn, model, context_angles, context_bases, target_bases, rep_keys[0]
+    )
 
     t0 = time.time()
-    loss, grads = grad_fn(model, context, rep_keys[0])
+    loss, grads = grad_fn(
+        model, context_angles, context_bases, target_bases, rep_keys[0]
+    )
     jax.block_until_ready((loss, grads))
     t_warmup = time.time() - t0
 
@@ -134,7 +155,9 @@ def run(
     rep_peak_rss = rss_stage_c
     for i in range(n_reps):
         t0 = time.time()
-        loss, grads = grad_fn(model, context, rep_keys[i + 1])
+        loss, grads = grad_fn(
+            model, context_angles, context_bases, target_bases, rep_keys[i + 1]
+        )
         jax.block_until_ready((loss, grads))
         times.append(time.time() - t0)
         rep_peak_rss = max(rep_peak_rss, rss_mb())

@@ -22,10 +22,18 @@ from georax import CFEES25, GeometricTerm
 
 from models.torus import Torus, wrap_to_pi
 
+NUM_BASES = 4  # A, C, G, U
+
 
 def angle_features(theta: jax.Array) -> jax.Array:
     """Standard sin/cos encoding for inputs that live on a torus."""
     return jnp.concatenate([jnp.sin(theta), jnp.cos(theta)])
+
+
+def encode_bases(bases: jax.Array) -> jax.Array:
+    """One-hot encode an int array of base ids and flatten the trailing axis."""
+    one_hot = jax.nn.one_hot(bases, NUM_BASES, dtype=jnp.float32)
+    return one_hot.reshape(*bases.shape[:-1], bases.shape[-1] * NUM_BASES)
 
 
 class TorusDriftField(eqx.Module):
@@ -85,7 +93,7 @@ class TorusDiffusionField(eqx.Module):
 
 
 class GRUEncoder(eqx.Module):
-    """GRU encoder over a sequence of sin/cos angle states."""
+    """GRU encoder over a sequence of per-residue feature vectors."""
 
     cell: eqx.nn.GRUCell
     proj: eqx.nn.Linear
@@ -116,6 +124,7 @@ class TorusNeuralSDE(eqx.Module):
     name: str = eqx.field(static=True)
 
     d: int = eqx.field(static=True)
+    bases_per_state: int = eqx.field(static=True)
     ctx_dim: int = eqx.field(static=True)
     n_steps: int = eqx.field(static=True)
     dt: float = eqx.field(static=True)
@@ -132,6 +141,7 @@ class TorusNeuralSDE(eqx.Module):
         solver: AbstractSolver = CFEES25(),
         diffusion_scale: float = 0.3,
         adjoint: AbstractAdjoint | None = None,
+        residues_per_state: int = 1,
         *,
         key,
     ):
@@ -139,16 +149,25 @@ class TorusNeuralSDE(eqx.Module):
 
         geometry = Torus(num_angles)
         d = geometry.dimension
+        bases_per_state = residues_per_state
+        base_feature_dim = bases_per_state * NUM_BASES
 
         self.name = "torus_nsde"
         self.d = d
+        self.bases_per_state = bases_per_state
         self.ctx_dim = ctx_dim
         self.n_steps = n_steps
         self.dt = dt
         self.solver = solver
         self.adjoint = adjoint
 
-        self.encoder = GRUEncoder(2 * d, hidden_dim, ctx_dim, key=k1)
+        # Encoder consumes per-step (sin/cos angle features, one-hot bases).
+        encoder_input_dim = 2 * d + base_feature_dim
+        self.encoder = GRUEncoder(
+            encoder_input_dim, hidden_dim, ctx_dim - base_feature_dim, key=k1
+        )
+        # Drift/diffusion see (sin/cos angle features, ctx) where ctx carries
+        # both the encoder output AND the target residue's base one-hot.
         self.drift_field = TorusDriftField(
             geometry=geometry, ctx_dim=ctx_dim, hidden_dim=hidden_dim, key=k2
         )
@@ -160,12 +179,28 @@ class TorusNeuralSDE(eqx.Module):
             key=k3,
         )
 
-    def __call__(self, context_angles, key):
-        """context_angles: (T, d). Returns predicted (d,) angle state."""
+    def __call__(
+        self,
+        context_angles: jax.Array,
+        context_bases: jax.Array,
+        target_bases: jax.Array,
+        key: jax.Array,
+    ) -> jax.Array:
+        """Forecast the next state's angles.
+
+        context_angles: (T, d)
+        context_bases:  (T, bases_per_state) int
+        target_bases:   (bases_per_state,) int
+        key:            PRNG key
+        """
         y0 = wrap_to_pi(context_angles[-1])
 
-        context_features = jax.vmap(angle_features)(context_angles)
-        ctx = self.encoder(context_features)
+        angle_seq = jax.vmap(angle_features)(context_angles)  # (T, 2d)
+        base_seq = encode_bases(context_bases)  # (T, bases_per_state * 4)
+        encoder_input = jnp.concatenate([angle_seq, base_seq], axis=-1)
+        ctx_from_encoder = self.encoder(encoder_input)  # (ctx_dim - base_feat,)
+        target_base_feat = encode_bases(target_bases)  # (bases_per_state * 4,)
+        ctx = jnp.concatenate([ctx_from_encoder, target_base_feat])
 
         t1 = self.n_steps * self.dt
         brownian_path = VirtualBrownianTree(

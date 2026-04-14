@@ -93,6 +93,7 @@ def make_model(
                 dt=config.dt,
                 solver=build_solver(config.solver),
                 diffusion_scale=config.diffusion_scale,
+                residues_per_state=config.residues_per_state,
                 key=key,
             )
         case _:

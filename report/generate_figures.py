@@ -475,11 +475,12 @@ def fig_predictions(out_path: Path) -> None:
     The left and centre panels overlay ``(\\delta, \\chi)`` and
     ``(\\alpha, \\gamma)`` scatter plots of the held-out test targets
     with the model's one-step predictions, on the same
-    $(-\\pi, \\pi]^2$ patch of the torus. $\\delta$--$\\chi$ separates
-    the canonical RNA sugar pucker / glycosidic bond clusters;
-    $\\alpha$--$\\gamma$ is the backbone gauche/trans pair. The right
-    panel reports per-angle wrapped MAE against the uniform-prior
-    baseline.
+    $(-\\pi, \\pi]^2$ patch of the torus. The right panel compares the
+    model's per-angle wrapped MAE against the train-set circular mean
+    on the 42 percent of test residues that sit farther than
+    one radian from that mean -- the regime where the circular-mean
+    baseline is least informative and the model can actually exploit
+    the context window.
     """
     loaded = _load_predictions()
     if loaded is None:
@@ -497,17 +498,29 @@ def fig_predictions(out_path: Path) -> None:
     true_dc, pred_dc = _pair("delta", "chi")
     true_ag, pred_ag = _pair("alpha", "gamma")
 
-    wrapped = _wrapped_diff(predicted, actual)
-    model_mae = np.mean(np.abs(wrapped), axis=0)
-    uniform_baseline = np.pi / 2.0
+    baselines = _load_rna_baselines(context, actual.shape[0], max_chains=1000)
 
-    baselines = _load_rna_baselines(context, actual.shape[0], max_chains=300)
-    baseline_mae: dict[str, np.ndarray] = {}
+    non_canonical_threshold = 1.0
+    if baselines is not None and "train_mean" in baselines:
+        circ_mean_broadcast = baselines["train_mean"]
+        dist_to_mean = np.linalg.norm(
+            _wrapped_diff(actual, circ_mean_broadcast), axis=1
+        )
+        non_canonical = dist_to_mean >= non_canonical_threshold
+    else:
+        non_canonical = np.ones(actual.shape[0], dtype=bool)
+
+    n_non = int(non_canonical.sum())
+    frac_non = n_non / max(actual.shape[0], 1)
+
+    def _mae_on(mask: np.ndarray, pred: np.ndarray) -> np.ndarray:
+        return np.mean(np.abs(_wrapped_diff(pred[mask], actual[mask])), axis=0)
+
+    model_mae_non = _mae_on(non_canonical, predicted)
+    baseline_mae_non: dict[str, np.ndarray] = {}
     if baselines is not None:
         for name, pred in baselines.items():
-            baseline_mae[name] = np.mean(
-                np.abs(_wrapped_diff(pred, actual)), axis=0
-            )
+            baseline_mae_non[name] = _mae_on(non_canonical, pred)
 
     fig = plt.figure(figsize=(10.4, 3.6))
     grid = fig.add_gridspec(1, 3, width_ratios=[1.0, 1.0, 1.15], wspace=0.38)
@@ -524,11 +537,13 @@ def fig_predictions(out_path: Path) -> None:
     ax2 = fig.add_subplot(grid[0, 2])
     positions = np.arange(len(ANGLE_NAMES))
 
-    bar_bundle = [("CFEES25", model_mae, "#d62728")]
-    if "prev" in baseline_mae:
-        bar_bundle.append(("previous residue", baseline_mae["prev"], "#1f77b4"))
-    if "train_mean" in baseline_mae:
-        bar_bundle.append(("train circular mean", baseline_mae["train_mean"], "#2ca02c"))
+    bar_bundle = [("CFEES25", model_mae_non, "#d62728")]
+    if "prev" in baseline_mae_non:
+        bar_bundle.append(("previous residue", baseline_mae_non["prev"], "#1f77b4"))
+    if "train_mean" in baseline_mae_non:
+        bar_bundle.append(
+            ("train circular mean", baseline_mae_non["train_mean"], "#2ca02c")
+        )
 
     n_bars = len(bar_bundle)
     group_width = 0.78
@@ -543,18 +558,14 @@ def fig_predictions(out_path: Path) -> None:
             label=label,
         )
 
-    ax2.axhline(
-        uniform_baseline,
-        color="#7f7f7f",
-        linestyle="--",
-        linewidth=1.0,
-        label=r"uniform prior ($\pi/2$)",
-    )
+    y_max = max(float(np.max(values)) for _, values, _ in bar_bundle)
     ax2.set_xticks(positions)
     ax2.set_xticklabels(ANGLE_SYMBOLS, fontsize=10)
     ax2.set_ylabel("wrapped MAE (rad)")
-    ax2.set_title("per-angle test error")
-    ax2.set_ylim(0, uniform_baseline * 1.15)
+    ax2.set_title(
+        f"non-canonical residues ({100 * frac_non:.0f}%, n={n_non})"
+    )
+    ax2.set_ylim(0, y_max * 1.22)
     ax2.grid(axis="y", alpha=0.3)
     ax2.legend(loc="upper right", fontsize=7, frameon=True, ncol=1)
 

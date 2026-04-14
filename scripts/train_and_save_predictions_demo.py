@@ -21,8 +21,12 @@ import optax
 
 from datasets.rna.dataset import RNATorsionDataset
 from experiment.config import Devices, Experiments, Solvers, make_config
-from experiment.factories import make_loader, make_model, make_prediction_fn
-from experiment.rna_losses import make_wrapped_mae_metric, make_wrapped_mse_loss
+from experiment.factories import make_loader, make_model
+from experiment.rna_losses import (
+    make_wrapped_energy_score_loss,
+    make_wrapped_mae_metric,
+    make_wrapped_mse_loss,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUT_PATH = PROJECT_ROOT / "results" / "rna_predictions_demo.npz"
@@ -31,24 +35,26 @@ OUT_PATH = PROJECT_ROOT / "results" / "rna_predictions_demo.npz"
 def main() -> int:
     config = make_config(
         experiment=Experiments.RNA,
-        epochs=40,
+        epochs=80,
         batch_size=64,
         learning_rate=3e-4,
         seed=0,
         device=Devices.GPU,
-        hidden_dim=128,
-        ctx_dim=64,
+        hidden_dim=256,
+        ctx_dim=128,
         n_steps=50,
         dt=0.05,
         solver=Solvers.CFEES25,
         diffusion_scale=0.1,
         context_length=20,
         residues_per_state=1,
-        max_chains=300,
+        max_chains=1000,
     )
     n_mc_samples = 16
     warmup_steps = 500
     weight_decay = 1e-4
+    use_energy_score = False
+    energy_score_samples = 8
 
     train_ds = RNATorsionDataset(
         split="train",
@@ -60,17 +66,11 @@ def main() -> int:
 
     key = jax.random.key(config.seed)
     model = make_model(config, metadata, key)
-    prediction_fn = make_prediction_fn()
-    loss_fn = make_wrapped_mse_loss(
-        input_key="context_angles",
-        target_key="target_angles",
-        prediction_fn=prediction_fn,
-    )
-    metric_fn = make_wrapped_mae_metric(
-        input_key="context_angles",
-        target_key="target_angles",
-        prediction_fn=prediction_fn,
-    )
+    if use_energy_score:
+        loss_fn = make_wrapped_energy_score_loss(n_samples=energy_score_samples)
+    else:
+        loss_fn = make_wrapped_mse_loss()
+    metric_fn = make_wrapped_mae_metric()
     train_loader = make_loader(config, "train")
     train_loader_next = jax.jit(train_loader.next)
     val_loader = make_loader(config, "val")
@@ -141,8 +141,10 @@ def main() -> int:
         residues_per_state=config.residues_per_state,
     )
     arrays = test_ds.as_array_dict()
-    context = jnp.asarray(arrays["context_angles"])
-    target = jnp.asarray(arrays["target_angles"])
+    context_angles = jnp.asarray(arrays["context_angles"])
+    context_bases = jnp.asarray(arrays["context_bases"])
+    target_angles = jnp.asarray(arrays["target_angles"])
+    target_bases = jnp.asarray(arrays["target_bases"])
 
     # Test-time averaging: draw n_mc_samples stochastic rollouts per context
     # and circular-mean them on the torus.
@@ -150,23 +152,29 @@ def main() -> int:
     per_sample_keys = jax.random.split(base_key, n_mc_samples)
 
     @jax.jit
-    def predict_ensemble(ctx, keys):
+    def predict_ensemble(ctx_a, ctx_b, tgt_b, keys):
         def one_sample(k):
-            sub_keys = jax.random.split(k, ctx.shape[0])
-            return jax.vmap(lambda c, kk: model(c, kk))(ctx, sub_keys)
+            sub_keys = jax.random.split(k, ctx_a.shape[0])
+            return jax.vmap(
+                lambda a, cb, tb, kk: model(a, cb, tb, kk)
+            )(ctx_a, ctx_b, tgt_b, sub_keys)
         samples = jax.vmap(one_sample)(keys)  # (n_mc, n_test, d)
         mean_sin = jnp.mean(jnp.sin(samples), axis=0)
         mean_cos = jnp.mean(jnp.cos(samples), axis=0)
         return jnp.arctan2(mean_sin, mean_cos)
 
-    predicted = jax.device_get(predict_ensemble(context, per_sample_keys))
+    predicted = jax.device_get(
+        predict_ensemble(context_angles, context_bases, target_bases, per_sample_keys)
+    )
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     np.savez(
         OUT_PATH,
         predicted=np.asarray(predicted),
-        actual=np.asarray(target),
-        context_angles=np.asarray(context),
+        actual=np.asarray(target_angles),
+        context_angles=np.asarray(context_angles),
+        context_bases=np.asarray(context_bases),
+        target_bases=np.asarray(target_bases),
     )
     print(f"saved {OUT_PATH}", flush=True)
     print(f"n_test = {predicted.shape[0]}", flush=True)
