@@ -17,11 +17,6 @@ from datasets.rna.dataset import RNATorsionDataset
 from experiment.config import ExperimentConfig, Experiments, Solvers, load_config
 from experiment.factories import make_loader, make_model, make_prediction_fn
 from experiment.losses import LossFn, PyTree
-from experiment.memory_probe import (
-    measure_step_peak,
-    read_bytes_limit,
-    read_peak_memory_bytes,
-)
 from experiment.rna_losses import (
     make_wrapped_mae_metric,
     make_wrapped_mse_loss,
@@ -182,28 +177,6 @@ def predict_dataset(
     )
 
 
-def _measure_train_step_memory(model, loss_fn, config) -> tuple[int, int]:
-    """Run a few warm + measured forward+backward passes; return (peak, limit)."""
-    loader = make_loader(config, "train")
-    loader_next = jax.jit(loader.next)
-    key = jax.random.key(config.seed + 999)
-    state = loader.init_state(key)
-
-    @eqx.filter_jit
-    def grad_step(current_model, batch, mask, key):
-        return eqx.filter_value_and_grad(loss_fn)(current_model, batch, mask, key)
-
-    def run_one():
-        nonlocal state
-        nonlocal key
-        key, step_key = jax.random.split(key)
-        batch, state, mask = loader_next(state)
-        return grad_step(model, batch, mask, step_key)
-
-    peak = measure_step_peak(run_one, warmup=3, repeat=3)
-    return peak, read_bytes_limit()
-
-
 def _override_from_args(config: ExperimentConfig, args: argparse.Namespace) -> ExperimentConfig:
     overrides: dict[str, Any] = {}
     if args.solver is not None:
@@ -306,9 +279,6 @@ def main() -> int:
         ))))
     )
 
-    peak_bytes, bytes_limit = _measure_train_step_memory(best_model, loss_fn, config)
-    peak_after_eval = read_peak_memory_bytes()
-
     eqx.tree_serialise_leaves(output_dir / "torus_nsde.eqx", best_model)
     np.savez_compressed(
         output_dir / "test_predictions.npz",
@@ -321,9 +291,6 @@ def main() -> int:
         {
             "test_loss": float(test_loss),
             "test_wrapped_mae": float(test_mae),
-            "peak_bytes": int(peak_bytes),
-            "peak_bytes_after_eval": int(peak_after_eval),
-            "bytes_limit": int(bytes_limit),
             "solver": config.solver.value,
             "n_steps": int(config.n_steps),
             "residues_per_state": int(config.residues_per_state),
@@ -344,7 +311,6 @@ def main() -> int:
         f"saved artifacts to {output_dir}",
         f"test_loss={test_loss:.3e}",
         f"test_mae={test_mae:.3e}",
-        f"peak_mb={peak_bytes/2**20:.1f}",
         flush=True,
     )
     return 0
