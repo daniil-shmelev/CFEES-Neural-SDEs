@@ -24,10 +24,32 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import psutil
+from diffrax import (
+    DirectAdjoint,
+    RecursiveCheckpointAdjoint,
+    ReversibleAdjoint,
+)
 
 from experiment.config import Solvers
 from experiment.factories import build_solver
 from models.torus_nsde import TorusNeuralSDE
+
+
+def build_adjoint(name: str, n_steps: int):
+    """Map a CLI adjoint name to a diffrax adjoint instance."""
+    name = name.lower()
+    max_steps = n_steps + 8
+    if name == "auto":
+        return None
+    if name == "reversible":
+        return ReversibleAdjoint()
+    if name == "direct":
+        return DirectAdjoint()
+    if name in ("checkpoint_log", "recursive"):
+        return RecursiveCheckpointAdjoint()
+    if name in ("checkpoint_full", "full"):
+        return RecursiveCheckpointAdjoint(checkpoints=max_steps)
+    raise ValueError(f"unknown adjoint {name!r}")
 
 
 def rss_mb() -> float:
@@ -49,6 +71,7 @@ def run(
     solver: Solvers,
     n_reps: int,
     *,
+    adjoint: str = "auto",
     context_length: int = 20,
     hidden_dim: int = 128,
     ctx_dim: int = 64,
@@ -75,6 +98,7 @@ def run(
         dt=dt,
         solver=build_solver(solver),
         diffusion_scale=0.1,
+        adjoint=build_adjoint(adjoint, n_steps),
         key=jax.random.key(0),
     )
     context = jax.random.uniform(
@@ -121,6 +145,7 @@ def run(
         "num_angles": num_angles,
         "n_steps": n_steps,
         "solver": solver.value,
+        "adjoint": adjoint,
         "context_length": context_length,
         "hidden_dim": hidden_dim,
         "ctx_dim": ctx_dim,
@@ -151,6 +176,17 @@ def main() -> int:
     parser.add_argument("--n-steps", type=int, required=True)
     parser.add_argument("--solver", type=str, required=True)
     parser.add_argument("--n-reps", type=int, default=10)
+    parser.add_argument(
+        "--adjoint",
+        type=str,
+        default="auto",
+        choices=("auto", "reversible", "direct", "checkpoint_log", "checkpoint_full"),
+        help=(
+            "auto: ReversibleAdjoint for reversible solvers, DirectAdjoint otherwise. "
+            "checkpoint_full: RecursiveCheckpointAdjoint(checkpoints=max_steps), "
+            "i.e. one snapshot per step -> O(n) activation tape."
+        ),
+    )
     parser.add_argument("--context-length", type=int, default=20)
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--ctx-dim", type=int, default=64)
@@ -162,6 +198,7 @@ def main() -> int:
         args.n_steps,
         Solvers(args.solver),
         args.n_reps,
+        adjoint=args.adjoint,
         context_length=args.context_length,
         hidden_dim=args.hidden_dim,
         ctx_dim=args.ctx_dim,

@@ -6,6 +6,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from diffrax import (
+    AbstractAdjoint,
     AbstractReversibleSolver,
     AbstractSolver,
     ControlTerm,
@@ -119,6 +120,7 @@ class TorusNeuralSDE(eqx.Module):
     n_steps: int = eqx.field(static=True)
     dt: float = eqx.field(static=True)
     solver: AbstractSolver = eqx.field(static=True)
+    adjoint: AbstractAdjoint | None = eqx.field(static=True)
 
     def __init__(
         self,
@@ -129,6 +131,7 @@ class TorusNeuralSDE(eqx.Module):
         dt: float = 0.05,
         solver: AbstractSolver = CFEES25(),
         diffusion_scale: float = 0.3,
+        adjoint: AbstractAdjoint | None = None,
         *,
         key,
     ):
@@ -143,6 +146,7 @@ class TorusNeuralSDE(eqx.Module):
         self.n_steps = n_steps
         self.dt = dt
         self.solver = solver
+        self.adjoint = adjoint
 
         self.encoder = GRUEncoder(2 * d, hidden_dim, ctx_dim, key=k1)
         self.drift_field = TorusDriftField(
@@ -180,11 +184,12 @@ class TorusNeuralSDE(eqx.Module):
             geometry=self.drift_field.geometry,
         )
 
-        adjoint = (
-            ReversibleAdjoint()
-            if isinstance(self.solver, AbstractReversibleSolver)
-            else DirectAdjoint()
-        )
+        if self.adjoint is not None:
+            adjoint = self.adjoint
+        elif isinstance(self.solver, AbstractReversibleSolver):
+            adjoint = ReversibleAdjoint()
+        else:
+            adjoint = DirectAdjoint()
 
         sol = diffeqsolve(
             term,

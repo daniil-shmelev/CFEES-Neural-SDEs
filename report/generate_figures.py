@@ -16,6 +16,7 @@ REPORT_DIR = Path(__file__).resolve().parent
 RESULTS_DIR = REPORT_DIR.parent / "results"
 
 BENCHMARK_JSON = RESULTS_DIR / "rna_integrator_benchmark.json"
+SCALING_JSON = RESULTS_DIR / "rna_benchmark_scaling.json"
 
 plt.rcParams.update(
     {
@@ -39,11 +40,88 @@ SOLVER_COLOR = {
 }
 SOLVER_MARKER = {"cg2": "o", "cfees25": "s", "cg4": "^", "cfees27": "D"}
 
+MODE_LABEL = {
+    "cfees25:reversible": r"CFEES25 + ReversibleAdjoint",
+    "cg2:checkpoint_full": r"CG2 + checkpoint-every-step",
+    "cg2:auto": r"CG2 + DirectAdjoint (default)",
+    "cg2:direct": r"CG2 + DirectAdjoint",
+}
+MODE_COLOR = {
+    "cfees25:reversible": "#d62728",
+    "cg2:checkpoint_full": "#1f77b4",
+    "cg2:auto": "#7f7f7f",
+    "cg2:direct": "#7f7f7f",
+}
+MODE_MARKER = {
+    "cfees25:reversible": "s",
+    "cg2:checkpoint_full": "o",
+    "cg2:auto": "^",
+    "cg2:direct": "^",
+}
+
+
+def _mode_key(cell: dict) -> str:
+    return f"{cell.get('solver', '?')}:{cell.get('adjoint', 'auto')}"
+
 
 def _load_benchmark() -> dict[str, dict]:
     if not BENCHMARK_JSON.exists():
         return {}
     return json.loads(BENCHMARK_JSON.read_text())
+
+
+def _load_scaling() -> dict[str, dict]:
+    if not SCALING_JSON.exists():
+        return {}
+    return json.loads(SCALING_JSON.read_text())
+
+
+def fig_scaling(out_path: Path) -> None:
+    """HLO compile-time scratch vs n_steps for three (solver, adjoint) modes.
+
+    Expects the JSON produced by
+    ``experiment.integrator_benchmark_isolated`` run with
+    ``--modes cfees25:reversible cg2:checkpoint_full cg2:auto``.
+    """
+    records = _load_scaling()
+    rows = [r for r in records.values() if "error" not in r]
+    if not rows:
+        return
+
+    by_mode: dict[str, list[tuple[int, float]]] = defaultdict(list)
+    for r in rows:
+        mode = _mode_key(r)
+        by_mode[mode].append((int(r["n_steps"]), float(r["temp_bytes"]) / (1 << 20)))
+    for mode in by_mode:
+        by_mode[mode].sort()
+
+    fig, ax = plt.subplots(1, 1, figsize=(6.0, 3.8))
+    order = ["cg2:auto", "cg2:checkpoint_full", "cfees25:reversible"]
+    for mode in order:
+        items = by_mode.get(mode, [])
+        if not items:
+            continue
+        xs = [n for n, _ in items]
+        ys = [mb for _, mb in items]
+        ax.plot(
+            xs,
+            ys,
+            marker=MODE_MARKER.get(mode, "o"),
+            color=MODE_COLOR.get(mode, None),
+            label=MODE_LABEL.get(mode, mode),
+            markersize=6,
+            linewidth=1.5,
+        )
+
+    ax.set_xscale("log")
+    ax.set_xlabel(r"integration steps $n_{\mathrm{steps}}$")
+    ax.set_ylabel("XLA scratch (MiB, compile-time)")
+    ax.set_title(r"Compile-time memory vs. path length ($d=350$, batch $32$)")
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend(loc="upper left", frameon=True, fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
 
 
 def _cells(records: dict[str, dict]) -> list[dict]:
@@ -312,6 +390,7 @@ def main() -> int:
     fig_timing(REPORT_DIR / "fig_timing.pdf")
     fig_hlo_scratch(REPORT_DIR / "fig_hlo_scratch.pdf")
     fig_torus_trajectory(REPORT_DIR / "fig_trajectory.pdf")
+    fig_scaling(REPORT_DIR / "fig_scaling.pdf")
     print(f"wrote figures to {REPORT_DIR}")
     return 0
 

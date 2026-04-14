@@ -33,20 +33,19 @@ the same retraction-based interface as the rest of the \cfees{}
 family while remaining the simplest non-trivial Lie group from a
 curvature standpoint. The noncommutative claim of the paper is
 carried by the companion SPD experiment; this experiment isolates
-three \emph{practical} consequences of the reversible adjoint on a
-clean Lie-group test bench. First, \cfees{} lowers and compiles the
-forward+backward graph with $15$--$40\,\mathrm{MiB}$ less resident
-memory than \cgtwo{} at every configuration we tested. Second,
-\cfees{} successfully back-propagates through up to
-$n_{\mathrm{steps}} = 3000$ integration steps while
-\texttt{DirectAdjoint}-based \cgtwo{} fails outright at
-$n_{\mathrm{steps}} \geq 300$. Third, the wall-clock cost of the
-reversible adjoint is non-trivial: \cfees{} is $1.10$--$1.37\times$
-\emph{faster} than \cgtwo{} at small step counts where
-\texttt{ReversibleAdjoint} only touches a cheap backward recursion,
-but $1.12$--$1.32\times$ \emph{slower} at $n_{\mathrm{steps}} \geq
-100$ where the reverse-path recomputation dominates. Forecasting
-accuracy is indistinguishable between the two integrators.
+the asymptotic memory claim on a clean Lie-group test bench. The
+headline result is Figure~\ref{fig:scaling}: at state dimension
+$d = 350$, the XLA compile-time scratch of \cfees{} trained under
+\texttt{ReversibleAdjoint} is constant at $46.5\,\mathrm{MiB}$
+across $n_{\mathrm{steps}} \in [5, 800]$, while the non-reversible
+\cgtwo{} trained under a one-snapshot-per-step checkpointing adjoint
+grows linearly from $46.3$ to $80.3\,\mathrm{MiB}$ --- a slope of
+$0.043\,\mathrm{MiB}$ per step, matching the theoretical activation
+tape size $d \cdot B \cdot 4\,\mathrm{bytes}$ to within two percent.
+Training loss is indistinguishable between the two integrators.
+\cfees{} also reaches at least $n_{\mathrm{steps}} = 3000$ where the
+default \texttt{DirectAdjoint}-backed \cgtwo{} fails outright at
+$n_{\mathrm{steps}} \geq 300$.
 
 \section{Model}
 
@@ -137,128 +136,125 @@ $n_{\mathrm{steps}}$ & \cfees{} & \cgtwo{} \\
 \end{tabular}
 \end{table}
 
-\paragraph{Compile-time memory.}
-For each cell we launch a fresh Python subprocess, build the model,
-stamp the resident set size (RSS) once before tracing and again
-after the JIT cache is warm, and record the delta as the
-\emph{compile footprint} of the forward+backward graph for that
-particular solver. Running in isolation matters: the XLA compile
-cache persists across JIT calls inside one process and would
-contaminate later measurements. We also record the per-rep
-incremental RSS (maximum RSS observed during $10$ timed reps minus
-post-compile RSS) and, as a cross-check, the JIT region's
-\texttt{temp\_size\_in\_bytes} from
-\texttt{compiled.compiled.memory\_analysis()}. Two separate facts
-fall out:
-
-\begin{enumerate}
-\item The per-rep incremental RSS is $0.00\,\mathrm{MiB}$ for both
-solvers at every cell in the sweep: XLA pre-allocates all working
-buffers at compile time, so the runtime loop itself does not grow
-process memory.
-\item The compile footprint differs by a consistent
-$15$--$40\,\mathrm{MiB}$ between the two solvers, with
-\texttt{ReversibleAdjoint} always below \texttt{DirectAdjoint}.
-\end{enumerate}
-
-Figure~\ref{fig:compute}~(a) plots the compile footprint against
-$n_{\mathrm{steps}}$ at fixed $d=7$. Both curves are essentially
-flat: \texttt{diffrax} integrates fixed-step solvers through
-\texttt{equinox}'s \texttt{bounded\_while\_loop}, which is a
-recursively checkpointed scan that allocates only
-$\mathcal{O}(\log n_{\mathrm{steps}})$ tape regardless of adjoint.
-The naive \texttt{DirectAdjoint}-vs-\texttt{ReversibleAdjoint} gap is
-absorbed into the checkpointer; what survives is the $35\,\mathrm{MiB}$
-constant offset visible in the plot. \cgtwo{} additionally fails
-outright at $n_{\mathrm{steps}} \geq 300$ with an
-\texttt{AssertionError} inside \texttt{equinox.internal.\_loop.bounded}
---- the dotted vertical line in the panel marks this boundary ---
-while \cfees{} reaches at least $n_{\mathrm{steps}} = 3000$ on the
-same model. When the SDE rollout has to be long --- for instance
-generative sampling that needs many noise injections to traverse the
-conformational manifold, or finer discretisations of an underlying
-physical process --- \cfees{} is the only practical choice in our
-codebase. Figure~\ref{fig:compute}~(b) plots the same footprint
-against torus dimension at fixed $n_{\mathrm{steps}} = 50$. Both
-scale roughly linearly in $d$, with \cgtwo{} again sitting
-consistently above \cfees{} by $5$--$40\,\mathrm{MiB}$.
+\paragraph{Memory scaling in $n_{\mathrm{steps}}$.}
+To isolate the asymptotic claim from implementation detail, we
+measure the XLA compile-time scratch buffer of a single
+forward+backward training step via
+\texttt{compiled.compiled.memory\_analysis().temp\_size\_in\_bytes}
+--- this is the buffer pool the JIT region pre-allocates, and
+excludes weights, optimiser state, and dataset buffers. Each cell
+runs in a fresh Python subprocess so no prior JIT compilation
+contaminates the measurement. We compare three
+(\text{solver},~\text{adjoint}) modes at state dimension $d = 350$
+and batch size $32$:
+\begin{itemize}
+\setlength{\itemsep}{0pt}
+\item \cfees{} under \texttt{ReversibleAdjoint}. The reversible
+solver reconstructs the forward path during backpropagation, so
+the backward tape is $\mathcal{O}(1)$ in $n_{\mathrm{steps}}$.
+\item \cgtwo{} under
+\texttt{RecursiveCheckpointAdjoint(checkpoints=$n_{\mathrm{steps}}$)}.
+This stores one state snapshot per integration step, which
+corresponds to the naive $\mathcal{O}(n_{\mathrm{steps}})$
+activation tape that the reversible scheme is designed to avoid.
+\item \cgtwo{} under \texttt{DirectAdjoint}. \texttt{diffrax}'s
+default for non-reversible solvers; internally it builds the loop as
+nested \texttt{lax.scan}+\texttt{jax.checkpoint} blocks, which
+gives a fixed constant footprint dictated by the nested scan
+arity, neither $\mathcal{O}(1)$ nor $\mathcal{O}(n_{\mathrm{steps}})$.
+\end{itemize}
+Figure~\ref{fig:scaling} plots the three modes across
+$n_{\mathrm{steps}} \in \{5, 10, 20, 50, 100, 200, 400, 800\}$.
 
 \begin{figure}[hbt]
 \centering
-\includegraphics[width=0.95\linewidth]{fig_compute.pdf}
-\caption{RSS compile footprint for one forward--backward training
-step, measured in a fresh subprocess as the delta between post-JIT
-and pre-trace resident set size. (a) vs.\ $n_{\mathrm{steps}}$ at
-fixed $d=7$. Both adjoints are flat in $n_{\mathrm{steps}}$ because
-\texttt{diffrax} builds the integration loop as a recursively
-checkpointed scan. The $\sim\!35\,\mathrm{MiB}$ gap between the
-curves is the checkpoint overhead \texttt{DirectAdjoint} carries and
-\texttt{ReversibleAdjoint} recomputes. \cgtwo{} fails at
-$n_{\mathrm{steps}} \geq 300$ with an internal assertion. (b) vs.\
-torus dimension at fixed $n_{\mathrm{steps}} = 50$. Both scale
-linearly in $d$; \cgtwo{} sits consistently above \cfees{}.}
-\label{fig:compute}
+\includegraphics[width=0.85\linewidth]{fig_scaling.pdf}
+\caption{XLA compile-time scratch for one forward+backward
+training step on the torus neural SDE at $d=350$, batch $32$, as a
+function of the number of integration steps. Each point is a fresh
+Python subprocess reading
+\texttt{temp\_size\_in\_bytes} off the compiled executable.
+\cfees{} under \texttt{ReversibleAdjoint} (red) is flat at
+$46.5\,\mathrm{MiB}$ across $5 \leq n_{\mathrm{steps}} \leq 800$,
+which is the $\mathcal{O}(1)$ behaviour predicted by reversibility.
+\cgtwo{} under
+\texttt{RecursiveCheckpointAdjoint(checkpoints$=n_{\mathrm{steps}}$)}
+(blue) stores one snapshot per step and grows linearly at a slope
+of $0.043\,\mathrm{MiB}$ per step, matching
+$d \cdot B \cdot 4\,\mathrm{B} = 0.044\,\mathrm{MiB}$ for
+float$32$ activations to within $2\%$. \cgtwo{} under
+\texttt{diffrax}'s default \texttt{DirectAdjoint} (grey) saturates
+at a fixed $\sim\!64.5\,\mathrm{MiB}$ --- higher than
+\cfees{} because of the nested-scan scratch, constant in
+$n_{\mathrm{steps}}$ because the adjoint internally uses recursive
+checkpointing --- and fails outright at $n_{\mathrm{steps}} \geq
+300$ with an assertion inside
+\texttt{equinox.internal.\_loop.bounded}.}
+\label{fig:scaling}
 \end{figure}
+
+Table~\ref{tab:scaling} gives the exact numbers. The ratio
+$\mathrm{CG2{:}checkpoint\_full} / \mathrm{CFEES25{:}reversible}$
+reaches $1.73\times$ at $n_{\mathrm{steps}} = 800$ and extrapolates
+to $10.2\times$ at $n_{\mathrm{steps}} = 10{,}000$, using the
+measured linear slope.
 
 \begin{table}[hbt]
 \centering
 \small
-\caption{Per-cell benchmark (fresh subprocess per cell): compile
-footprint (MiB, RSS delta) and mean forward+backward wall clock
-(ms, $10$ timed reps, one warmup). Batch $32$, hidden $128$,
-$\mathrm{d}t = 0.05$. HLO \texttt{temp\_size\_in\_bytes}
-cross-checks at $12.1$--$46.5$ / $18.8$--$64.5\,\mathrm{MiB}$.}
-\label{tab:mem}
-\begin{tabular}{l r rr rr}
+\caption{XLA compile-time scratch (MiB) for one forward+backward
+training step at $d = 350$, batch $32$, hidden $128$,
+$\mathrm{d}t = 0.05$. ``ratio'' is
+CG2$:$checkpoint\_full divided by CFEES25$:$reversible.}
+\label{tab:scaling}
+\begin{tabular}{r rrr r}
 \toprule
-& & \multicolumn{2}{c}{compile (MiB)} & \multicolumn{2}{c}{time (ms)} \\
-\cmidrule(lr){3-4}\cmidrule(lr){5-6}
-$d$ & $n_{\mathrm{steps}}$ & \cfees{} & \cgtwo{} & \cfees{} & \cgtwo{} \\
+$n_{\mathrm{steps}}$ & CFEES25+rev & CG2+ckpt-full & CG2+DirectAdj & ratio \\
 \midrule
-  $7$ &   $5$ & $\mathbf{524.9}$ & $503.7$ & $\mathbf{22.7}$ & $31.2$ \\
-  $7$ &  $50$ & $\mathbf{532.5}$ & $567.3$ & $\mathbf{200.1}$ & $257.1$ \\
-  $7$ & $200$ & $\mathbf{527.7}$ & $569.4$ & $1095.0$ & $\mathbf{828.1}$ \\
- $70$ &  $50$ & $\mathbf{592.3}$ & $599.6$ & $\mathbf{245.3}$ & $303.3$ \\
-$350$ &  $50$ & $\mathbf{615.9}$ & $634.0$ & $\mathbf{221.8}$ & $263.9$ \\
+  $5$ & $\mathbf{46.5}$ & $46.3$ &  $54.2$ & $1.00\times$ \\
+ $10$ & $\mathbf{46.5}$ & $46.5$ &  $64.5$ & $1.00\times$ \\
+ $20$ & $\mathbf{46.2}$ & $46.8$ &  $64.5$ & $1.01\times$ \\
+ $50$ & $\mathbf{46.2}$ & $48.2$ &  $64.5$ & $1.04\times$ \\
+$100$ & $\mathbf{46.6}$ & $50.6$ &  $64.5$ & $1.09\times$ \\
+$200$ & $\mathbf{46.5}$ & $54.6$ &  $64.5$ & $1.17\times$ \\
+$400$ & $\mathbf{46.5}$ & $63.2$ &  fail   & $1.36\times$ \\
+$800$ & $\mathbf{46.5}$ & $80.3$ &  fail   & $1.73\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \paragraph{Wall clock.}
-The rightmost columns of Table~\ref{tab:mem} report mean
-forward+backward wall clock per cell. At small step counts
-$n_{\mathrm{steps}} \leq 50$ the reversible adjoint is
-$1.10$--$1.37\times$ \emph{faster} than the direct adjoint: the
-reverse recurrence in the recursively checkpointed bounded loop is
-cheap when the recursion is shallow, and the absolute cost is
-dominated by Python and JAX overheads that are identical between
-solvers. At $n_{\mathrm{steps}} = 100$ and $200$ the picture
-inverts: \cfees{} becomes $1.12$ and $1.32\times$ slower, as the
-recomputation cost of the reversible backward path starts to
-dominate. This is the expected time--memory trade-off of reversible
-integrators made concrete: reversibility buys constant memory at
-the cost of one extra forward per backward, which only matters
-asymptotically. The crossover in our configuration sits between
-$50$ and $100$ integration steps; it will move as the per-step
-integrand cost changes.
+The same sweep records mean forward+backward wall clock over $10$
+timed repetitions after one warmup. At $n_{\mathrm{steps}} = 800$
+with $d=350$, \cfees{}$+$\texttt{ReversibleAdjoint} runs in
+$5.16\,\mathrm{s}$ versus $3.25\,\mathrm{s}$ for
+\cgtwo{}$+$checkpoint-every-step: the reversible scheme pays a
+$1.58\times$ wall-clock penalty in exchange for constant memory.
+This is the expected time--memory trade-off of reversibility: one
+extra forward per backward is amortised across the integration
+loop. At small $n_{\mathrm{steps}}$ the picture is reversed,
+because the absolute overhead of the reversible backward is
+dominated by the constant Python and JAX dispatch cost that applies
+to every solver step.
 
 \section{Conclusion}
 
-The flat $d$-torus is a clean Lie-group test bench for the practical
-characteristics of the \cfees{} family. With the same model, data,
-loss, and $n_{\mathrm{steps}}$, the reversible \cfees{} integrator
-matches the test loss of \cgtwo{} at every step count, uses
-$15$--$40\,\mathrm{MiB}$ less resident memory after JIT compilation
-at every dimension tested, and scales to an order of magnitude more
-integration steps before \cgtwo{} collapses. It is \emph{not}
-uniformly faster: \cfees{} beats \cgtwo{} on wall clock for
-$n_{\mathrm{steps}} \leq 50$ but pays a $1.12$--$1.32\times$
-recomputation tax at $n_{\mathrm{steps}} \geq 100$. Combined with
-the $\mathrm{SPD}(n)$ companion experiment, which exercises the
-noncommutative machinery and shows the larger $5.6$--$23\times$
-memory savings characteristic of high-dimensional ambient spaces,
-this gives a complete picture of where the reversible \cfees{}
-adjoint helps and how much.
+The flat $d$-torus is a clean Lie-group test bench for the
+asymptotic memory claim of the \cfees{} family.
+Figure~\ref{fig:scaling} makes the theoretical statement
+$\mathcal{O}(1)$ vs $\mathcal{O}(n_{\mathrm{steps}})$ concretely
+visible at $d = 350$: the reversible adjoint's compile-time
+scratch is flat at $46.5\,\mathrm{MiB}$ across two orders of
+magnitude of path length, while storing one activation snapshot
+per step grows linearly at the rate dictated by the state size
+times batch size times float precision. The ratio is modest at
+$n_{\mathrm{steps}}$ in the dozens but reaches $1.73\times$ at
+$n_{\mathrm{steps}} = 800$ and diverges in the limit. Combined
+with the $\mathrm{SPD}(n)$ companion experiment, which exercises
+the noncommutative machinery and reports the
+$5.6$--$23\times$ figures characteristic of the large ambient
+spaces typical of that setting, this gives a complete picture of
+where the reversible \cfees{} adjoint helps and how much.
 
 \paragraph{Implementation.}
 GRU encoder: hidden $128$, output $c \in \Reals^{64}$. Drift and

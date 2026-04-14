@@ -34,6 +34,7 @@ def run_subprocess(
     n_reps: int,
     python_bin: str,
     *,
+    adjoint: str,
     context_length: int,
     hidden_dim: int,
     ctx_dim: int,
@@ -47,6 +48,7 @@ def run_subprocess(
         "--num-angles", str(num_angles),
         "--n-steps", str(n_steps),
         "--solver", solver,
+        "--adjoint", adjoint,
         "--n-reps", str(n_reps),
         "--context-length", str(context_length),
         "--hidden-dim", str(hidden_dim),
@@ -92,7 +94,17 @@ def main() -> int:
         default="7x5,7x10,7x20,7x50,7x100,7x200,14x50,35x50,70x50,140x50,210x50",
         help="Comma-separated DxN pairs where D=num_angles, N=n_steps.",
     )
-    parser.add_argument("--solvers", nargs="+", default=["cfees25", "cg2"])
+    parser.add_argument(
+        "--modes",
+        nargs="+",
+        default=["cfees25:reversible", "cg2:checkpoint_full", "cg2:auto"],
+        help=(
+            "Space-separated list of `solver:adjoint` combinations. Each is run "
+            "as its own subprocess cell. Adjoint names match "
+            "integrator_benchmark_single --adjoint: auto, reversible, direct, "
+            "checkpoint_log, checkpoint_full."
+        ),
+    )
     parser.add_argument("--n-reps", type=int, default=10)
     parser.add_argument("--context-length", type=int, default=20)
     parser.add_argument("--hidden-dim", type=int, default=128)
@@ -109,10 +121,18 @@ def main() -> int:
 
     config_pairs = _parse_configs(args.configs)
 
+    modes: list[tuple[str, str]] = []
+    for m in args.modes:
+        if ":" not in m:
+            modes.append((m, "auto"))
+        else:
+            solver, adjoint = m.split(":", 1)
+            modes.append((solver, adjoint))
+
     results: Dict[str, dict] = {}
     for num_angles, n_steps in config_pairs:
-        for solver in args.solvers:
-            key = f"{solver}_d{num_angles}_n{n_steps}"
+        for solver, adjoint in modes:
+            key = f"{solver}-{adjoint}_d{num_angles}_n{n_steps}"
             print(f"[isolated] {key} ...", end="", flush=True)
             try:
                 r = run_subprocess(
@@ -121,6 +141,7 @@ def main() -> int:
                     solver,
                     args.n_reps,
                     args.python,
+                    adjoint=adjoint,
                     context_length=args.context_length,
                     hidden_dim=args.hidden_dim,
                     ctx_dim=args.ctx_dim,
@@ -140,9 +161,12 @@ def main() -> int:
                 results[key] = {"error": str(e)}
                 print(f" FAILED: {type(e).__name__}: {str(e)[:200]}", flush=True)
 
+    mode_labels = [f"{s}:{a}" for s, a in modes]
+    col_width = max(16, max(len(lbl) for lbl in mode_labels) + 2)
+    col_fmt = f"  {{:>{col_width}s}}"
     header = (
         f"  {'d':>4s}  {'n_steps':>8s}"
-        + "".join(f"  {s:>14s}" for s in args.solvers)
+        + "".join(col_fmt.format(lbl) for lbl in mode_labels)
     )
     print()
     print("=" * len(header))
@@ -155,25 +179,25 @@ def main() -> int:
     print("-" * len(header))
     for num_angles, n_steps in config_pairs:
         row = f"  {num_angles:>4d}  {n_steps:>8d}"
-        for solver in args.solvers:
-            r = results.get(f"{solver}_d{num_angles}_n{n_steps}", {})
+        for solver, adjoint in modes:
+            r = results.get(f"{solver}-{adjoint}_d{num_angles}_n{n_steps}", {})
             val = r.get("mean_s", float("nan"))
-            row += f"  {val:>14.4f}"
+            row += f"  {val:>{col_width}.4f}"
         print(row)
 
-    def _print_table(title: str, field: str, fmt: str = "{:>14.1f}", scale: float = 1.0) -> None:
+    def _print_table(title: str, field: str, fmt: str = "{:>{w}.1f}", scale: float = 1.0) -> None:
         print()
         print(title)
         print(header)
         for num_angles, n_steps in config_pairs:
             row = f"  {num_angles:>4d}  {n_steps:>8d}"
-            for solver in args.solvers:
-                r = results.get(f"{solver}_d{num_angles}_n{n_steps}", {})
+            for solver, adjoint in modes:
+                r = results.get(f"{solver}-{adjoint}_d{num_angles}_n{n_steps}", {})
                 raw = r.get(field)
                 if raw is None:
-                    row += "  " + fmt.format(float("nan"))
+                    row += "  " + f"{'nan':>{col_width}}"
                 else:
-                    row += "  " + fmt.format(float(raw) * scale)
+                    row += "  " + fmt.format(float(raw) * scale, w=col_width)
             print(row)
 
     _print_table(
@@ -183,7 +207,7 @@ def main() -> int:
     _print_table(
         "per-rep incremental RSS (MB) = max(rss during reps) - rss(post-compile)",
         "rep_peak_incr_mb",
-        fmt="{:>14.2f}",
+        fmt="{:>{w}.2f}",
     )
     _print_table(
         "HLO compile-time scratch (MiB) from memory_analysis().temp_size_in_bytes",
