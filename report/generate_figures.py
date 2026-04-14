@@ -400,48 +400,49 @@ def _wrapped_diff(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.arctan2(np.sin(d), np.cos(d))
 
 
-def _load_predictions() -> tuple[np.ndarray, np.ndarray] | None:
+def _load_predictions() -> tuple[np.ndarray, np.ndarray, np.ndarray | None] | None:
+    """Return ``(predicted, actual, context_angles_or_None)`` from the npz."""
     if not PREDICTIONS_NPZ.exists():
         return None
     data = np.load(PREDICTIONS_NPZ)
-    return np.asarray(data["predicted"]), np.asarray(data["actual"])
+    predicted = np.asarray(data["predicted"])
+    actual = np.asarray(data["actual"])
+    context = np.asarray(data["context_angles"]) if "context_angles" in data.files else None
+    return predicted, actual, context
 
 
-def _load_rna_baselines(n_test: int) -> dict[str, np.ndarray] | None:
+def _load_rna_baselines(
+    context: np.ndarray | None, n_test: int, max_chains: int
+) -> dict[str, np.ndarray] | None:
     """Return baseline predictions aligned with the test targets.
 
-    Returns a dict with keys ``prev``, ``train_mean``, each of shape
-    ``(n_test, 7)``. ``prev`` is ``context_angles[:, -1, :]``
-    (the last residue in each context window); ``train_mean`` is
-    the circular mean of the training-set targets broadcast to
-    every test sample.
+    ``prev`` is ``context_angles[:, -1, :]`` (the last residue in each context
+    window); ``train_mean`` is the circular mean of the training-set targets
+    broadcast across the test set.
     """
+    baselines: dict[str, np.ndarray] = {}
+    if context is not None:
+        baselines["prev"] = context[:, -1, :]
+
     try:
         from datasets.rna.dataset import RNATorsionDataset
-    except Exception:  # noqa: BLE001
-        return None
-    try:
-        test = RNATorsionDataset(
-            split="test", max_chains=100, context_length=20, residues_per_state=1
-        )
-        train = RNATorsionDataset(
-            split="train", max_chains=100, context_length=20, residues_per_state=1
-        )
-    except Exception:  # noqa: BLE001
-        return None
 
-    if len(test) < n_test:
-        return None
-    prev = np.asarray(test.as_array_dict()["context_angles"])[:n_test, -1, :]
+        train = RNATorsionDataset(
+            split="train",
+            max_chains=max_chains,
+            context_length=20,
+            residues_per_state=1,
+        )
+    except Exception:  # noqa: BLE001
+        return baselines or None
+
     train_targets = np.asarray(train.as_array_dict()["target_angles"])
     circular_mean = np.arctan2(
         np.mean(np.sin(train_targets), axis=0),
         np.mean(np.cos(train_targets), axis=0),
     )
-    return {
-        "prev": prev,
-        "train_mean": np.broadcast_to(circular_mean, (n_test, 7)).copy(),
-    }
+    baselines["train_mean"] = np.broadcast_to(circular_mean, (n_test, 7)).copy()
+    return baselines
 
 
 def _torus_scatter(ax, true_xy: np.ndarray, pred_xy: np.ndarray, x_label: str, y_label: str) -> None:
@@ -483,7 +484,7 @@ def fig_predictions(out_path: Path) -> None:
     loaded = _load_predictions()
     if loaded is None:
         return
-    predicted, actual = loaded
+    predicted, actual, context = loaded
 
     def _pair(name_x: str, name_y: str) -> tuple[np.ndarray, np.ndarray]:
         ix = ANGLE_NAMES.index(name_x)
@@ -500,7 +501,7 @@ def fig_predictions(out_path: Path) -> None:
     model_mae = np.mean(np.abs(wrapped), axis=0)
     uniform_baseline = np.pi / 2.0
 
-    baselines = _load_rna_baselines(actual.shape[0])
+    baselines = _load_rna_baselines(context, actual.shape[0], max_chains=300)
     baseline_mae: dict[str, np.ndarray] = {}
     if baselines is not None:
         for name, pred in baselines.items():

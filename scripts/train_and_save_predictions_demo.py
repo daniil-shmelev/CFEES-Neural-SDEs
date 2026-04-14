@@ -31,8 +31,8 @@ OUT_PATH = PROJECT_ROOT / "results" / "rna_predictions_demo.npz"
 def main() -> int:
     config = make_config(
         experiment=Experiments.RNA,
-        epochs=20,
-        batch_size=32,
+        epochs=40,
+        batch_size=64,
         learning_rate=3e-4,
         seed=0,
         device=Devices.GPU,
@@ -44,8 +44,11 @@ def main() -> int:
         diffusion_scale=0.1,
         context_length=20,
         residues_per_state=1,
-        max_chains=100,
+        max_chains=300,
     )
+    n_mc_samples = 16
+    warmup_steps = 500
+    weight_decay = 1e-4
 
     train_ds = RNATorsionDataset(
         split="train",
@@ -68,20 +71,34 @@ def main() -> int:
         target_key="target_angles",
         prediction_fn=prediction_fn,
     )
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(1.0),
-        optax.adam(config.learning_rate),
-    )
-    opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
-
     train_loader = make_loader(config, "train")
     train_loader_next = jax.jit(train_loader.next)
     val_loader = make_loader(config, "val")
     val_loader_next = jax.jit(val_loader.next)
 
+    total_train_steps = train_loader.steps_per_epoch * config.epochs
+    schedule = optax.warmup_cosine_decay_schedule(
+        init_value=0.0,
+        peak_value=config.learning_rate,
+        warmup_steps=min(warmup_steps, total_train_steps // 4),
+        decay_steps=max(total_train_steps - warmup_steps, 1),
+        end_value=config.learning_rate * 0.05,
+    )
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.adamw(learning_rate=schedule, weight_decay=weight_decay),
+    )
+    opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
+
     key, train_key, val_key = jax.random.split(key, 3)
     train_state = train_loader.init_state(train_key)
     val_state = val_loader.init_state(val_key)
+    print(
+        f"train={train_loader.steps_per_epoch * config.batch_size}"
+        f" val={val_loader.steps_per_epoch * config.batch_size}"
+        f" n_mc={n_mc_samples} warmup={warmup_steps}/{total_train_steps}",
+        flush=True,
+    )
 
     @eqx.filter_jit
     def train_step(m, opt_state, batch, mask, step_key):
@@ -127,9 +144,22 @@ def main() -> int:
     context = jnp.asarray(arrays["context_angles"])
     target = jnp.asarray(arrays["target_angles"])
 
-    sample_keys = jax.random.split(jax.random.key(config.seed + 99), context.shape[0])
-    predict_fn = jax.vmap(lambda c, k: model(c, k))
-    predicted = jax.device_get(predict_fn(context, sample_keys))
+    # Test-time averaging: draw n_mc_samples stochastic rollouts per context
+    # and circular-mean them on the torus.
+    base_key = jax.random.key(config.seed + 99)
+    per_sample_keys = jax.random.split(base_key, n_mc_samples)
+
+    @jax.jit
+    def predict_ensemble(ctx, keys):
+        def one_sample(k):
+            sub_keys = jax.random.split(k, ctx.shape[0])
+            return jax.vmap(lambda c, kk: model(c, kk))(ctx, sub_keys)
+        samples = jax.vmap(one_sample)(keys)  # (n_mc, n_test, d)
+        mean_sin = jnp.mean(jnp.sin(samples), axis=0)
+        mean_cos = jnp.mean(jnp.cos(samples), axis=0)
+        return jnp.arctan2(mean_sin, mean_cos)
+
+    predicted = jax.device_get(predict_ensemble(context, per_sample_keys))
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     np.savez(
