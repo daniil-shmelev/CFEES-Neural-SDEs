@@ -186,10 +186,10 @@ def fig_hlo_scratch(out_path: Path) -> None:
 
 def _simulate_torus_trajectory(
     d: int = 2,
-    n_steps: int = 400,
-    dt: float = 0.03,
-    drift_rate: tuple[float, float] = (0.6, 0.9),
-    diffusion_scale: float = 0.45,
+    n_steps: int = 600,
+    dt: float = 0.008,
+    drift_rate: tuple[float, float] = (0.9, 1.3),
+    diffusion_scale: float = 0.35,
     seed: int = 3,
 ) -> np.ndarray:
     """Integrate a T^d SDE forward via CFEES25 and return the saved path."""

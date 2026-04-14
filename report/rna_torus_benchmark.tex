@@ -85,15 +85,15 @@ trains under \texttt{ReversibleAdjoint}, which reconstructs the
 forward path during backpropagation; \cgtwo{} is not reversible and
 trains under \texttt{DirectAdjoint}, which lets JAX differentiate the
 unrolled forward graph. Figure~\ref{fig:trajectory} shows a single
-$400$-step \cfees{} sample path on $\Torus^{2}$ in the standard
+$600$-step \cfees{} sample path on $\Torus^{2}$ in the standard
 embedding into $\Reals^{3}$.
 
 \begin{figure}[hbt]
 \centering
 \includegraphics[width=0.62\linewidth]{fig_trajectory.pdf}
 \caption{A single stochastic trajectory of a constant-drift SDE on
-$\Torus^{2}$, integrated for $400$ steps of size
-$\mathrm{d}t = 0.03$ by \cfees{} and embedded into $\Reals^{3}$ via
+$\Torus^{2}$, integrated for $600$ steps of size
+$\mathrm{d}t = 0.008$ by \cfees{} and embedded into $\Reals^{3}$ via
 $(x, y, z) = \big((R + r\cos\phi)\cos\theta, (R + r\cos\phi)\sin\theta, r\sin\phi\big)$.
 The solver's retraction wraps the state into $(-\pi, \pi]^{2}$ after
 every stage, and the polyline is broken wherever two consecutive
