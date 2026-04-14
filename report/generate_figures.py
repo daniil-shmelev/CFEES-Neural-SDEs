@@ -407,6 +407,43 @@ def _load_predictions() -> tuple[np.ndarray, np.ndarray] | None:
     return np.asarray(data["predicted"]), np.asarray(data["actual"])
 
 
+def _load_rna_baselines(n_test: int) -> dict[str, np.ndarray] | None:
+    """Return baseline predictions aligned with the test targets.
+
+    Returns a dict with keys ``prev``, ``train_mean``, each of shape
+    ``(n_test, 7)``. ``prev`` is ``context_angles[:, -1, :]``
+    (the last residue in each context window); ``train_mean`` is
+    the circular mean of the training-set targets broadcast to
+    every test sample.
+    """
+    try:
+        from datasets.rna.dataset import RNATorsionDataset
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        test = RNATorsionDataset(
+            split="test", max_chains=100, context_length=20, residues_per_state=1
+        )
+        train = RNATorsionDataset(
+            split="train", max_chains=100, context_length=20, residues_per_state=1
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+    if len(test) < n_test:
+        return None
+    prev = np.asarray(test.as_array_dict()["context_angles"])[:n_test, -1, :]
+    train_targets = np.asarray(train.as_array_dict()["target_angles"])
+    circular_mean = np.arctan2(
+        np.mean(np.sin(train_targets), axis=0),
+        np.mean(np.cos(train_targets), axis=0),
+    )
+    return {
+        "prev": prev,
+        "train_mean": np.broadcast_to(circular_mean, (n_test, 7)).copy(),
+    }
+
+
 def _torus_scatter(ax, true_xy: np.ndarray, pred_xy: np.ndarray, x_label: str, y_label: str) -> None:
     """Overlay true and predicted samples in $(-\\pi, \\pi]^2$ with translucent dots."""
     ax.scatter(
@@ -463,8 +500,16 @@ def fig_predictions(out_path: Path) -> None:
     model_mae = np.mean(np.abs(wrapped), axis=0)
     uniform_baseline = np.pi / 2.0
 
+    baselines = _load_rna_baselines(actual.shape[0])
+    baseline_mae: dict[str, np.ndarray] = {}
+    if baselines is not None:
+        for name, pred in baselines.items():
+            baseline_mae[name] = np.mean(
+                np.abs(_wrapped_diff(pred, actual)), axis=0
+            )
+
     fig = plt.figure(figsize=(10.4, 3.6))
-    grid = fig.add_gridspec(1, 3, width_ratios=[1.0, 1.0, 1.1], wspace=0.38)
+    grid = fig.add_gridspec(1, 3, width_ratios=[1.0, 1.0, 1.15], wspace=0.38)
 
     ax0 = fig.add_subplot(grid[0, 0])
     _torus_scatter(ax0, true_dc, pred_dc, r"$\delta$ (rad)", r"$\chi$ (rad)")
@@ -477,7 +522,26 @@ def fig_predictions(out_path: Path) -> None:
 
     ax2 = fig.add_subplot(grid[0, 2])
     positions = np.arange(len(ANGLE_NAMES))
-    ax2.bar(positions, model_mae, color="#d62728", width=0.7, label="CFEES25")
+
+    bar_bundle = [("CFEES25", model_mae, "#d62728")]
+    if "prev" in baseline_mae:
+        bar_bundle.append(("previous residue", baseline_mae["prev"], "#1f77b4"))
+    if "train_mean" in baseline_mae:
+        bar_bundle.append(("train circular mean", baseline_mae["train_mean"], "#2ca02c"))
+
+    n_bars = len(bar_bundle)
+    group_width = 0.78
+    bar_width = group_width / n_bars
+    for i, (label, values, color) in enumerate(bar_bundle):
+        offset = (i - (n_bars - 1) / 2) * bar_width
+        ax2.bar(
+            positions + offset,
+            values,
+            width=bar_width,
+            color=color,
+            label=label,
+        )
+
     ax2.axhline(
         uniform_baseline,
         color="#7f7f7f",
@@ -489,9 +553,9 @@ def fig_predictions(out_path: Path) -> None:
     ax2.set_xticklabels(ANGLE_SYMBOLS, fontsize=10)
     ax2.set_ylabel("wrapped MAE (rad)")
     ax2.set_title("per-angle test error")
-    ax2.set_ylim(0, uniform_baseline * 1.1)
+    ax2.set_ylim(0, uniform_baseline * 1.15)
     ax2.grid(axis="y", alpha=0.3)
-    ax2.legend(loc="upper right", fontsize=8, frameon=True)
+    ax2.legend(loc="upper right", fontsize=7, frameon=True, ncol=1)
 
     fig.savefig(out_path, bbox_inches="tight", pad_inches=0.08)
     plt.close(fig)
