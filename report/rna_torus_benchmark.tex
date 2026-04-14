@@ -9,6 +9,7 @@
 
 \newcommand{\cfees}{\textsc{cfees25}}
 \newcommand{\cgtwo}{\textsc{cg2}}
+\newcommand{\cgfour}{\textsc{cg4}}
 \newcommand{\Torus}{\mathrm{T}}
 \newcommand{\SO}{\mathrm{SO}}
 \newcommand{\Reals}{\mathbb{R}}
@@ -38,13 +39,16 @@ headline result is Figure~\ref{fig:scaling}: at state dimension
 $d = 350$, the XLA compile-time scratch of \cfees{} trained under
 \texttt{ReversibleAdjoint} is constant at $46.5\,\mathrm{MiB}$
 across $n_{\mathrm{steps}} \in [5, 800]$, while the non-reversible
-\cgtwo{} trained under a one-snapshot-per-step checkpointing adjoint
-grows linearly from $46.3$ to $80.3\,\mathrm{MiB}$ --- a slope of
+\cgtwo{} and \textsc{cg4} trained under a one-snapshot-per-step
+checkpointing adjoint grow linearly at the same slope
 $0.043\,\mathrm{MiB}$ per step, matching the theoretical activation
 tape size $d \cdot B \cdot 4\,\mathrm{bytes}$ to within two percent.
-Training loss is indistinguishable between the two integrators, and
-\cfees{} reaches at least $n_{\mathrm{steps}} = 3000$ on the same
-model.
+Solver order does not affect the slope because checkpointing stores
+only the ODE state, not the per-step stage values; \textsc{cg4} sits
+$\sim\!3\,\mathrm{MiB}$ above \cgtwo{} as a constant offset from the
+larger tableau. Training loss is indistinguishable between the
+three integrators, and \cfees{} reaches at least
+$n_{\mathrm{steps}} = 3000$ on the same model.
 
 \section{Model}
 
@@ -143,7 +147,7 @@ forward+backward training step via
 --- this is the buffer pool the JIT region pre-allocates, and
 excludes weights, optimiser state, and dataset buffers. Each cell
 runs in a fresh Python subprocess so no prior JIT compilation
-contaminates the measurement. We compare two
+contaminates the measurement. We compare three
 (\text{solver},~\text{adjoint}) modes at state dimension $d = 350$
 and batch size $32$:
 \begin{itemize}
@@ -151,82 +155,84 @@ and batch size $32$:
 \item \cfees{} under \texttt{ReversibleAdjoint}. The reversible
 solver reconstructs the forward path during backpropagation, so
 the backward tape is $\mathcal{O}(1)$ in $n_{\mathrm{steps}}$.
-\item \cgtwo{} under
-\texttt{RecursiveCheckpointAdjoint(checkpoints=$n_{\mathrm{steps}}$)}.
-This stores one state snapshot per integration step, which is the
-naive $\mathcal{O}(n_{\mathrm{steps}})$ activation tape that the
+\item \cgtwo{} (order two) and \cgfour{} (order four) under
+\texttt{RecursiveCheckpointAdjoint} (abbrev.\ \texttt{RCA}) with
+\texttt{checkpoints} set to $n_{\mathrm{steps}}$. Both store one
+ODE-state snapshot per integration step; this is the naive
+$\mathcal{O}(n_{\mathrm{steps}})$ activation tape that the
 reversible scheme is designed to avoid.
 \end{itemize}
-Figure~\ref{fig:scaling} plots both modes across
-$n_{\mathrm{steps}} \in \{5, 10, 20, 50, 100, 200, 400, 800\}$ on
-log--log axes.
+Figure~\ref{fig:scaling} plots all three modes across
+$n_{\mathrm{steps}} \in \{5, 10, 20, 50, 100, 200, 400, 800\}$.
 
 \begin{figure}[hbt]
 \centering
 \includegraphics[width=0.85\linewidth]{fig_scaling.pdf}
 \caption{XLA compile-time scratch for one forward+backward
-training step on the torus neural SDE at $d=350$, batch $32$, on
-log--log axes. Each point is a fresh Python subprocess reading
+training step on the torus neural SDE at $d=350$, batch $32$.
+Each point is a fresh Python subprocess reading
 \texttt{temp\_size\_in\_bytes} off the compiled executable.
 \cfees{} under \texttt{ReversibleAdjoint} (red) is flat at
 $46.5\,\mathrm{MiB}$ across $5 \leq n_{\mathrm{steps}} \leq 800$,
 the $\mathcal{O}(1)$ behaviour predicted by reversibility.
-\cgtwo{} under
+\cgtwo{} (blue) and \cgfour{} (green) under
 \texttt{RecursiveCheckpointAdjoint(checkpoints$=n_{\mathrm{steps}}$)}
-(blue) stores one snapshot per step and grows linearly at a slope
-of $0.043\,\mathrm{MiB}$ per step, matching
-$d \cdot B \cdot 4\,\mathrm{B} = 0.044\,\mathrm{MiB}$ for
-float$32$ activations to within $2\%$. The log--log presentation
-makes the transition visible: at small $n_{\mathrm{steps}}$ the
-constant non-tape scratch dominates and the blue curve sits on top
-of the red one, then rolls over onto an asymptotic slope of one as
-the tape term takes over.}
+both grow linearly at a slope of $\sim\!0.043\,\mathrm{MiB}$ per
+step, matching $d \cdot B \cdot 4\,\mathrm{B} = 0.044\,\mathrm{MiB}$
+for float$32$ activations to within $2\%$. The two curves share the
+same slope: solver order does not change the memory complexity
+under checkpointing, because each snapshot stores only the ODE
+state $y$, not the stage values. \cgfour{} sits
+$\sim\!3\,\mathrm{MiB}$ above \cgtwo{} as a constant offset from
+its larger stage tableau.}
 \label{fig:scaling}
 \end{figure}
 
 Table~\ref{tab:scaling} gives the exact numbers. The ratio
 $\mathrm{CG2{:}checkpoint\_full} / \mathrm{CFEES25{:}reversible}$
-reaches $1.73\times$ at $n_{\mathrm{steps}} = 800$ and extrapolates
-to $10.2\times$ at $n_{\mathrm{steps}} = 10{,}000$, using the
-measured linear slope.
+reaches $1.72\times$ at $n_{\mathrm{steps}} = 800$ and extrapolates
+to $10.2\times$ at $n_{\mathrm{steps}} = 10{,}000$ using the
+measured linear slope; \cgfour{} is essentially parallel, a couple
+of percent higher.
 
 \begin{table}[hbt]
 \centering
 \small
 \caption{XLA compile-time scratch (MiB) for one forward+backward
 training step at $d = 350$, batch $32$, hidden $128$,
-$\mathrm{d}t = 0.05$. ``ratio'' is
-CG2$:$checkpoint\_full divided by CFEES25$:$reversible.}
+$\mathrm{d}t = 0.05$. \cfees{} uses \texttt{ReversibleAdjoint};
+\cgtwo{} and \cgfour{} use
+\texttt{RecursiveCheckpointAdjoint(checkpoints=$n_{\mathrm{steps}}$)}.}
 \label{tab:scaling}
-\begin{tabular}{r rr r}
+\begin{tabular}{r rrr r}
 \toprule
-$n_{\mathrm{steps}}$ & CFEES25+reversible & CG2+checkpoint-full & ratio \\
+$n_{\mathrm{steps}}$ & \cfees{} & \cgtwo{} & \cgfour{} & \cgtwo{}$/$\cfees{} \\
 \midrule
-  $5$ & $\mathbf{46.5}$ & $46.3$ & $1.00\times$ \\
- $10$ & $\mathbf{46.5}$ & $46.5$ & $1.00\times$ \\
- $20$ & $\mathbf{46.2}$ & $46.8$ & $1.01\times$ \\
- $50$ & $\mathbf{46.2}$ & $48.2$ & $1.04\times$ \\
-$100$ & $\mathbf{46.6}$ & $50.6$ & $1.09\times$ \\
-$200$ & $\mathbf{46.5}$ & $54.6$ & $1.17\times$ \\
-$400$ & $\mathbf{46.5}$ & $63.2$ & $1.36\times$ \\
-$800$ & $\mathbf{46.5}$ & $80.3$ & $1.73\times$ \\
+  $5$ & $\mathbf{46.3}$ & $46.7$ & $49.0$ & $1.01\times$ \\
+ $10$ & $\mathbf{46.5}$ & $46.5$ & $49.2$ & $1.00\times$ \\
+ $20$ & $\mathbf{46.6}$ & $46.9$ & $49.2$ & $1.01\times$ \\
+ $50$ & $\mathbf{46.5}$ & $48.2$ & $50.1$ & $1.04\times$ \\
+$100$ & $\mathbf{46.5}$ & $50.5$ & $52.3$ & $1.09\times$ \\
+$200$ & $\mathbf{46.7}$ & $54.6$ & $56.5$ & $1.17\times$ \\
+$400$ & $\mathbf{46.3}$ & $63.2$ & $64.9$ & $1.37\times$ \\
+$800$ & $\mathbf{46.8}$ & $80.4$ & $82.8$ & $1.72\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \paragraph{Wall clock.}
-The same sweep records mean forward+backward wall clock over $10$
+The same sweep records mean forward+backward wall clock over five
 timed repetitions after one warmup. At $n_{\mathrm{steps}} = 800$
 with $d=350$, \cfees{}$+$\texttt{ReversibleAdjoint} runs in
-$5.16\,\mathrm{s}$ versus $3.25\,\mathrm{s}$ for
-\cgtwo{}$+$checkpoint-every-step: the reversible scheme pays a
-$1.58\times$ wall-clock penalty in exchange for constant memory.
-This is the expected time--memory trade-off of reversibility: one
-extra forward per backward is amortised across the integration
-loop. At small $n_{\mathrm{steps}}$ the picture is reversed,
-because the absolute overhead of the reversible backward is
-dominated by the constant Python and JAX dispatch cost that applies
-to every solver step.
+$5.02\,\mathrm{s}$ versus $3.09\,\mathrm{s}$ for
+\cgtwo{}$+$checkpoint-every-step and $3.37\,\mathrm{s}$ for
+\cgfour{}: the reversible scheme pays a $1.49$--$1.62\times$
+wall-clock penalty in exchange for constant memory. This is the
+expected time--memory trade-off of reversibility: one extra forward
+per backward is amortised across the integration loop. At small
+$n_{\mathrm{steps}}$ the absolute overhead of the reversible
+backward is dominated by the constant Python and JAX dispatch cost
+that applies to every solver step, and the wall-clock gap closes.
 
 \section{Conclusion}
 
@@ -237,12 +243,13 @@ $\mathcal{O}(1)$ vs $\mathcal{O}(n_{\mathrm{steps}})$ concretely
 visible at $d = 350$: the reversible adjoint's compile-time
 scratch is flat at $46.5\,\mathrm{MiB}$ across two orders of
 magnitude of path length, while storing one activation snapshot
-per step grows linearly at the rate dictated by the state size
-times batch size times float precision. The ratio is modest at
-$n_{\mathrm{steps}}$ in the dozens but reaches $1.73\times$ at
-$n_{\mathrm{steps}} = 800$ and diverges in the limit. Combined
-with the $\mathrm{SPD}(n)$ companion experiment, which exercises
-the noncommutative machinery and reports the
+per step grows linearly at a rate dictated by the state size
+times batch size times float precision --- independent of solver
+order, as the \cgtwo{} and \cgfour{} curves confirm. The ratio is
+modest at $n_{\mathrm{steps}}$ in the dozens but reaches
+$1.72\times$ at $n_{\mathrm{steps}} = 800$ and diverges in the
+limit. Combined with the $\mathrm{SPD}(n)$ companion experiment,
+which exercises the noncommutative machinery and reports the
 $5.6$--$23\times$ figures characteristic of the large ambient
 spaces typical of that setting, this gives a complete picture of
 where the reversible \cfees{} adjoint helps and how much.

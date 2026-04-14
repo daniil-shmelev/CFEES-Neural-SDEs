@@ -43,18 +43,21 @@ SOLVER_MARKER = {"cg2": "o", "cfees25": "s", "cg4": "^", "cfees27": "D"}
 MODE_LABEL = {
     "cfees25:reversible": r"CFEES25 + ReversibleAdjoint",
     "cg2:checkpoint_full": r"CG2 + checkpoint-every-step",
+    "cg4:checkpoint_full": r"CG4 + checkpoint-every-step",
     "cg2:auto": r"CG2 + DirectAdjoint (default)",
     "cg2:direct": r"CG2 + DirectAdjoint",
 }
 MODE_COLOR = {
     "cfees25:reversible": "#d62728",
     "cg2:checkpoint_full": "#1f77b4",
+    "cg4:checkpoint_full": "#2ca02c",
     "cg2:auto": "#7f7f7f",
     "cg2:direct": "#7f7f7f",
 }
 MODE_MARKER = {
     "cfees25:reversible": "s",
     "cg2:checkpoint_full": "o",
+    "cg4:checkpoint_full": "^",
     "cg2:auto": "^",
     "cg2:direct": "^",
 }
@@ -96,7 +99,7 @@ def fig_scaling(out_path: Path) -> None:
         by_mode[mode].sort()
 
     fig, ax = plt.subplots(1, 1, figsize=(6.0, 3.8))
-    order = ["cg2:checkpoint_full", "cfees25:reversible"]
+    order = ["cg4:checkpoint_full", "cg2:checkpoint_full", "cfees25:reversible"]
     for mode in order:
         items = by_mode.get(mode, [])
         if not items:
@@ -114,7 +117,6 @@ def fig_scaling(out_path: Path) -> None:
         )
 
     ax.set_xscale("log")
-    ax.set_yscale("log")
     ax.set_xlabel(r"integration steps $n_{\mathrm{steps}}$")
     ax.set_ylabel("XLA scratch (MiB, compile-time)")
     ax.set_title(r"Compile-time memory vs. path length ($d=350$, batch $32$)")
