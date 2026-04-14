@@ -10,6 +10,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 
 REPORT_DIR = Path(__file__).resolve().parent
 RESULTS_DIR = REPORT_DIR.parent / "results"
@@ -183,10 +184,134 @@ def fig_hlo_scratch(out_path: Path) -> None:
     plt.close(fig)
 
 
+def _simulate_torus_trajectory(
+    d: int = 2,
+    n_steps: int = 400,
+    dt: float = 0.03,
+    drift_rate: tuple[float, float] = (0.6, 0.9),
+    diffusion_scale: float = 0.45,
+    seed: int = 3,
+) -> np.ndarray:
+    """Integrate a T^d SDE forward via CFEES25 and return the saved path."""
+    import jax
+    import jax.numpy as jnp
+    from diffrax import (
+        ControlTerm,
+        MultiTerm,
+        ODETerm,
+        SaveAt,
+        VirtualBrownianTree,
+        diffeqsolve,
+    )
+    from georax import CFEES25, GeometricTerm
+
+    from models.torus import Torus
+
+    geometry = Torus(d)
+    t1 = n_steps * dt
+    key = jax.random.key(seed)
+    brownian = VirtualBrownianTree(
+        t0=0.0, t1=t1, tol=dt / 4.0, shape=(d,), key=key
+    )
+    drift_vec = jnp.asarray(drift_rate[:d], dtype=jnp.float32)
+
+    def drift(t, y, args):
+        del t, y, args
+        return drift_vec
+
+    def diffusion(t, y, args):
+        del t, args
+        return diffusion_scale * jnp.eye(d, dtype=y.dtype)
+
+    term = GeometricTerm(
+        inner=MultiTerm(ODETerm(drift), ControlTerm(diffusion, brownian)),
+        geometry=geometry,
+    )
+    ts = jnp.linspace(0.0, t1, n_steps + 1)
+    sol = diffeqsolve(
+        term,
+        CFEES25(),
+        t0=0.0,
+        t1=t1,
+        dt0=dt,
+        y0=jnp.zeros((d,), dtype=jnp.float32),
+        saveat=SaveAt(ts=ts),
+        max_steps=n_steps + 8,
+    )
+    return np.asarray(sol.ys)
+
+
+def _embed_torus(theta: float | np.ndarray, phi: float | np.ndarray, R: float, r: float):
+    x = (R + r * np.cos(phi)) * np.cos(theta)
+    y = (R + r * np.cos(phi)) * np.sin(theta)
+    z = r * np.sin(phi)
+    return x, y, z
+
+
+def _break_wrapped(thetas: np.ndarray) -> np.ndarray:
+    """Insert NaNs between samples that cross a $\\pm\\pi$ boundary.
+
+    The solver wraps its state to $(-\\pi, \\pi]$, so two consecutive samples
+    near the boundary can be close on the torus while lying on opposite sides
+    in the ambient embedding; a straight line between them would cut through
+    the interior. Splitting the polyline at those jumps keeps the drawing on
+    the manifold.
+    """
+    out = [thetas[0]]
+    for i in range(1, len(thetas)):
+        jump = np.any(np.abs(thetas[i] - thetas[i - 1]) > np.pi)
+        if jump:
+            out.append(np.full_like(thetas[i], np.nan))
+        out.append(thetas[i])
+    return np.asarray(out)
+
+
+def fig_torus_trajectory(out_path: Path) -> None:
+    """3D embedding of a sample SDE trajectory on $\\Torus^{2}$ via CFEES25."""
+    thetas = _simulate_torus_trajectory()
+    thetas_broken = _break_wrapped(thetas)
+
+    R, r = 3.0, 1.0
+    x, y, z = _embed_torus(thetas_broken[:, 0], thetas_broken[:, 1], R, r)
+
+    u = np.linspace(0.0, 2.0 * np.pi, 80)
+    v = np.linspace(0.0, 2.0 * np.pi, 36)
+    U, V = np.meshgrid(u, v)
+    Xt, Yt, Zt = _embed_torus(U, V, R, r)
+
+    fig = plt.figure(figsize=(5.2, 3.4))
+    ax = fig.add_subplot(111, projection="3d")
+    ax.plot_wireframe(
+        Xt, Yt, Zt,
+        color="0.8",
+        linewidth=0.3,
+        rstride=2,
+        cstride=3,
+    )
+    ax.plot(x, y, z, color="#d62728", linewidth=1.2, solid_capstyle="round")
+
+    valid = ~np.isnan(x)
+    ax.scatter(x[valid][0], y[valid][0], z[valid][0], color="#2ca02c", s=50, depthshade=False, label="start", zorder=5)
+    ax.scatter(x[valid][-1], y[valid][-1], z[valid][-1], color="#1f77b4", s=50, depthshade=False, label="end", zorder=5)
+
+    limit = R + r
+    ax.set_xlim(-limit, limit)
+    ax.set_ylim(-limit, limit)
+    ax.set_zlim(-r * 1.8, r * 1.8)
+    ax.set_box_aspect((1.0, 1.0, 0.42))
+    ax.set_axis_off()
+    ax.view_init(elev=32, azim=-55)
+    ax.legend(loc="upper left", frameon=False, fontsize=8, bbox_to_anchor=(0.02, 0.95))
+    fig.subplots_adjust(left=-0.05, right=1.05, top=1.08, bottom=-0.08)
+    fig.savefig(out_path, bbox_inches="tight", pad_inches=0.05)
+    plt.close(fig)
+
+
 def main() -> int:
     fig_compute(REPORT_DIR / "fig_compute.pdf")
     fig_timing(REPORT_DIR / "fig_timing.pdf")
     fig_hlo_scratch(REPORT_DIR / "fig_hlo_scratch.pdf")
+    fig_torus_trajectory(REPORT_DIR / "fig_trajectory.pdf")
     print(f"wrote figures to {REPORT_DIR}")
     return 0
 
