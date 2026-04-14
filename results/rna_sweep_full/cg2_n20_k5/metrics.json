@@ -1,0 +1,14 @@
+{
+  "batch_size": 32,
+  "bytes_limit": 6438912000,
+  "epochs": 8,
+  "n_steps": 20,
+  "n_train": 619,
+  "num_angles": 35,
+  "peak_bytes": 187160064,
+  "peak_bytes_after_eval": 187160064,
+  "residues_per_state": 5,
+  "solver": "cg2",
+  "test_loss": 0.31655973196029663,
+  "test_wrapped_mae": 0.36068272590637207
+}

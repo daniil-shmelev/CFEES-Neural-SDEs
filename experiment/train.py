@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import argparse
-import json
-import re
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 import equinox as eqx
 import jax
@@ -27,13 +24,12 @@ from experiment.losses import (
     replace_masked_spd_examples,
 )
 from experiment.factories import make_loader, make_model, make_prediction_fn
+from experiment.runtime import make_output_dir, model_name, save_json
 from results.plots import (
     plot_eigenvalue_spectrum,
     plot_riemannian_distance,
     plot_training_curves,
 )
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def fit(
@@ -196,23 +192,6 @@ def predict_dataset(
     )
 
 
-def _save_json(path: Path, payload: dict[str, Any]) -> None:
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-
-
-def _model_name(model: eqx.Module) -> str:
-    raw = getattr(model, "name", None)
-    name = str(raw() if callable(raw) else raw or model.__class__.__name__).strip()
-    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._-")
-    return sanitized or model.__class__.__name__.lower()
-
-
-def _make_output_dir(model: eqx.Module) -> Path:
-    timestamp = datetime.now().astimezone().strftime("%H%M%S_%Y%m%d")
-    return PROJECT_ROOT / "results" / f"{_model_name(model)}_{timestamp}"
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("config", type=Path, help="Path to experiment config TOML")
@@ -231,7 +210,7 @@ def main() -> int:
     )
 
     model_key = jax.random.key(config.seed)
-    model = make_model(config, metadata["n_stocks"], model_key)
+    model = make_model(config, metadata, model_key)
     prediction_fn = make_prediction_fn()
 
     loss_fn = make_georax_chart_loss(
@@ -248,7 +227,7 @@ def main() -> int:
         prediction_fn=prediction_fn,
     )
 
-    output_dir = _make_output_dir(model)
+    output_dir = make_output_dir(model)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"dataset sizes: train={len(train_dataset)}", flush=True)
@@ -301,8 +280,8 @@ def main() -> int:
         riemannian_distance=riemannian_distances,
     )
     np.save(output_dir / "chart_base.npy", np.asarray(jax.device_get(base_matrix)))
-    _save_json(output_dir / "history.json", history)
-    _save_json(
+    save_json(output_dir / "history.json", history)
+    save_json(
         output_dir / "metrics.json",
         {
             "test_loss": float(test_loss),

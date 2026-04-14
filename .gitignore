@@ -205,3 +205,24 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Claude Code session state
+.claude/
+
+# Local data caches (regeneratable)
+data/cache/
+
+# Per-cell sweep model checkpoints and large outputs
+results/**/*.eqx
+results/**/test_predictions.npz
+results/**/training_curves.png
+results/**/stdout.log
+
+# LaTeX intermediate files
+report/*.aux
+report/*.log
+report/*.out
+report/*.xdv
+report/*.fdb_latexmk
+report/*.fls
+report/*.synctex.gz

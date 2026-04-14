@@ -1,0 +1,14 @@
+{
+  "batch_size": 32,
+  "bytes_limit": 6438912000,
+  "epochs": 8,
+  "n_steps": 20,
+  "n_train": 619,
+  "num_angles": 35,
+  "peak_bytes": 103277824,
+  "peak_bytes_after_eval": 103277824,
+  "residues_per_state": 5,
+  "solver": "cfees25",
+  "test_loss": 0.31655460596084595,
+  "test_wrapped_mae": 0.3606685400009155
+}

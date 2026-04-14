@@ -9,6 +9,7 @@ import seali
 
 class Experiments(StrEnum):
     SPD = "spd"
+    RNA = "rna"
 
 
 class Devices(StrEnum):
@@ -17,8 +18,11 @@ class Devices(StrEnum):
 
 
 class Solvers(StrEnum):
-    GL2 = "gl2"
     CFEES25 = "cfees25"
+    CFEES27 = "cfees27"
+    CG2 = "cg2"
+    CG4 = "cg4"
+    RKMK = "rkmk"
 
 
 @dataclass(frozen=True)
@@ -30,7 +34,6 @@ class ExperimentConfig:
     loss_beta: float
     seed: int
     device: Devices
-    # model hyperparams
     hidden_dim: int
     ctx_dim: int
     n_steps: int
@@ -38,8 +41,10 @@ class ExperimentConfig:
     solver: Solvers
     diffusion_scale: float
     min_eigenvalue: float
-    # output
-    skip_plots: bool
+    context_length: int = 20
+    residues_per_state: int = 1
+    max_chains: int | None = None
+    skip_plots: bool = False
 
 
 def make_config(
@@ -58,6 +63,9 @@ def make_config(
     solver: Solvers = Solvers.CFEES25,
     diffusion_scale: float = 1.0,
     min_eigenvalue: float = 1e-6,
+    context_length: int = 20,
+    residues_per_state: int = 1,
+    max_chains: int | None = None,
     skip_plots: bool = False,
 ) -> ExperimentConfig:
     return ExperimentConfig(
@@ -75,6 +83,9 @@ def make_config(
         solver=solver,
         diffusion_scale=diffusion_scale,
         min_eigenvalue=min_eigenvalue,
+        context_length=context_length,
+        residues_per_state=residues_per_state,
+        max_chains=max_chains,
         skip_plots=skip_plots,
     )
 
@@ -82,6 +93,7 @@ def make_config(
 def load_config(path: Path) -> ExperimentConfig:
     with path.open("rb") as f:
         data = tomllib.load(f)
+    raw_max_chains = data.get("max_chains")
     return ExperimentConfig(
         experiment=Experiments(data["experiment"]),
         device=Devices(data["device"]),
@@ -97,7 +109,10 @@ def load_config(path: Path) -> ExperimentConfig:
         dt=data["dt"],
         diffusion_scale=data["diffusion_scale"],
         min_eigenvalue=data["min_eigenvalue"],
-        skip_plots=data["skip_plots"],
+        context_length=data.get("context_length", 20),
+        residues_per_state=data.get("residues_per_state", 1),
+        max_chains=None if raw_max_chains in (None, 0, -1) else int(raw_max_chains),
+        skip_plots=data.get("skip_plots", False),
     )
 
 
