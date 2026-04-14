@@ -17,6 +17,13 @@ RESULTS_DIR = REPORT_DIR.parent / "results"
 
 BENCHMARK_JSON = RESULTS_DIR / "rna_integrator_benchmark.json"
 SCALING_JSON = RESULTS_DIR / "rna_benchmark_scaling.json"
+PREDICTIONS_NPZ = RESULTS_DIR / "rna_predictions_demo.npz"
+
+ANGLE_NAMES = ("alpha", "beta", "gamma", "delta", "epsilon", "zeta", "chi")
+ANGLE_SYMBOLS = (
+    r"$\alpha$", r"$\beta$", r"$\gamma$", r"$\delta$",
+    r"$\epsilon$", r"$\zeta$", r"$\chi$",
+)
 
 plt.rcParams.update(
     {
@@ -388,12 +395,115 @@ def fig_torus_trajectory(out_path: Path) -> None:
     plt.close(fig)
 
 
+def _wrapped_diff(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    d = a - b
+    return np.arctan2(np.sin(d), np.cos(d))
+
+
+def _load_predictions() -> tuple[np.ndarray, np.ndarray] | None:
+    if not PREDICTIONS_NPZ.exists():
+        return None
+    data = np.load(PREDICTIONS_NPZ)
+    return np.asarray(data["predicted"]), np.asarray(data["actual"])
+
+
+def _torus_scatter(ax, true_xy: np.ndarray, pred_xy: np.ndarray, x_label: str, y_label: str) -> None:
+    """Overlay true and predicted samples in $(-\\pi, \\pi]^2$ with translucent dots."""
+    ax.scatter(
+        true_xy[:, 0], true_xy[:, 1],
+        s=22, color="#1f77b4", alpha=0.45,
+        edgecolors="none", label="test targets",
+    )
+    ax.scatter(
+        pred_xy[:, 0], pred_xy[:, 1],
+        s=22, color="#d62728", alpha=0.45,
+        edgecolors="none", label="CFEES25 predictions",
+    )
+    ax.set_xlim(-np.pi, np.pi)
+    ax.set_ylim(-np.pi, np.pi)
+    ax.set_xticks([-np.pi, 0.0, np.pi])
+    ax.set_xticklabels([r"$-\pi$", r"$0$", r"$\pi$"])
+    ax.set_yticks([-np.pi, 0.0, np.pi])
+    ax.set_yticklabels([r"$-\pi$", r"$0$", r"$\pi$"])
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
+    ax.set_aspect("equal")
+    ax.grid(True, alpha=0.25)
+
+
+def fig_predictions(out_path: Path) -> None:
+    """Visualise a trained CFEES25 torus neural SDE on the test set.
+
+    The left and centre panels overlay ``(\\delta, \\chi)`` and
+    ``(\\alpha, \\gamma)`` scatter plots of the held-out test targets
+    with the model's one-step predictions, on the same
+    $(-\\pi, \\pi]^2$ patch of the torus. $\\delta$--$\\chi$ separates
+    the canonical RNA sugar pucker / glycosidic bond clusters;
+    $\\alpha$--$\\gamma$ is the backbone gauche/trans pair. The right
+    panel reports per-angle wrapped MAE against the uniform-prior
+    baseline.
+    """
+    loaded = _load_predictions()
+    if loaded is None:
+        return
+    predicted, actual = loaded
+
+    def _pair(name_x: str, name_y: str) -> tuple[np.ndarray, np.ndarray]:
+        ix = ANGLE_NAMES.index(name_x)
+        iy = ANGLE_NAMES.index(name_y)
+        return (
+            np.stack([actual[:, ix], actual[:, iy]], axis=1),
+            np.stack([predicted[:, ix], predicted[:, iy]], axis=1),
+        )
+
+    true_dc, pred_dc = _pair("delta", "chi")
+    true_ag, pred_ag = _pair("alpha", "gamma")
+
+    wrapped = _wrapped_diff(predicted, actual)
+    model_mae = np.mean(np.abs(wrapped), axis=0)
+    uniform_baseline = np.pi / 2.0
+
+    fig = plt.figure(figsize=(10.4, 3.6))
+    grid = fig.add_gridspec(1, 3, width_ratios=[1.0, 1.0, 1.1], wspace=0.38)
+
+    ax0 = fig.add_subplot(grid[0, 0])
+    _torus_scatter(ax0, true_dc, pred_dc, r"$\delta$ (rad)", r"$\chi$ (rad)")
+    ax0.set_title(r"sugar pucker / glycosidic bond")
+    ax0.legend(loc="lower right", fontsize=7, frameon=True, markerscale=1.2)
+
+    ax1 = fig.add_subplot(grid[0, 1])
+    _torus_scatter(ax1, true_ag, pred_ag, r"$\alpha$ (rad)", r"$\gamma$ (rad)")
+    ax1.set_title(r"backbone $\alpha/\gamma$ pair")
+
+    ax2 = fig.add_subplot(grid[0, 2])
+    positions = np.arange(len(ANGLE_NAMES))
+    ax2.bar(positions, model_mae, color="#d62728", width=0.7, label="CFEES25")
+    ax2.axhline(
+        uniform_baseline,
+        color="#7f7f7f",
+        linestyle="--",
+        linewidth=1.0,
+        label=r"uniform prior ($\pi/2$)",
+    )
+    ax2.set_xticks(positions)
+    ax2.set_xticklabels(ANGLE_SYMBOLS, fontsize=10)
+    ax2.set_ylabel("wrapped MAE (rad)")
+    ax2.set_title("per-angle test error")
+    ax2.set_ylim(0, uniform_baseline * 1.1)
+    ax2.grid(axis="y", alpha=0.3)
+    ax2.legend(loc="upper right", fontsize=8, frameon=True)
+
+    fig.savefig(out_path, bbox_inches="tight", pad_inches=0.08)
+    plt.close(fig)
+
+
 def main() -> int:
     fig_compute(REPORT_DIR / "fig_compute.pdf")
     fig_timing(REPORT_DIR / "fig_timing.pdf")
     fig_hlo_scratch(REPORT_DIR / "fig_hlo_scratch.pdf")
     fig_torus_trajectory(REPORT_DIR / "fig_trajectory.pdf")
     fig_scaling(REPORT_DIR / "fig_scaling.pdf")
+    fig_predictions(REPORT_DIR / "fig_predictions.pdf")
     print(f"wrote figures to {REPORT_DIR}")
     return 0
 

@@ -110,13 +110,47 @@ manifold.}
 For each $(\text{solver}, n_{\mathrm{steps}})$ cell we train for
 eight epochs of Adam ($10^{-3}$, batch $32$) on $6{,}785$ residue
 contexts drawn from $23$ chains and evaluate on a held-out test
-split of $336$ contexts from $5$ chains. Splits are computed at the
+split of $288$ contexts from $5$ chains. Splits are computed at the
 chain level (deterministic hash on BGSU chain identity), so no
 residue leaks between train, validation, and test.
 Table~\ref{tab:loss} reports the test wrapped MSE at state dimension
 $d = 7$. The spread between solvers at any fixed $n_{\mathrm{steps}}$
 is smaller than the spread between adjacent rows of the same solver,
 i.e.\ within run-to-run training noise.
+
+Figure~\ref{fig:predictions} gives a qualitative view of what the
+model has actually learned. The left panel overlays the held-out
+true targets (blue) against the model's one-step predictions (red)
+in the $(\delta, \chi)$ plane --- the two backbone dihedrals that
+separate the canonical sugar pucker / glycosidic bond modes of
+structured RNA. Both populations sit in the same
+C$3'$-endo~/~anti cluster that dominates A-form helices, with the
+predictions slightly more concentrated around the mode. The middle
+panel shows the $(\alpha, \gamma)$ pair: here the true distribution
+has noticeably more spread (including wrap to the $\pm\pi$
+boundary) and the model captures the main gauche band but
+under-predicts the tails, consistent with the per-angle MAE bar
+chart in the right panel. Across all seven angles the model beats
+the uniform-prior baseline of $\pi/2$ by a factor of $3$--$6\times$,
+with $\delta$, $\epsilon$, $\chi$ (the angles constrained by the
+dominant sugar pucker and glycosidic conformation) predicted best.
+
+\begin{figure}[hbt]
+\centering
+\includegraphics[width=0.98\linewidth]{fig_predictions.pdf}
+\caption{Trained CFEES25 torus neural SDE on the RNA test set.
+\emph{Left}: joint distribution of the $\delta$ (sugar pucker)
+and $\chi$ (glycosidic bond) dihedrals, with true held-out targets
+in blue and one-step model predictions in red. Both sit in the same
+C$3'$-endo~/~anti cluster of A-form RNA. \emph{Middle}:
+$\alpha$/$\gamma$ backbone pair; the model captures the main
+gauche band but under-covers the boundary clusters. \emph{Right}:
+per-angle wrapped MAE; the $\pi/2$ dashed line is the
+uniform-prior baseline (the expected error of a random angle on
+$\Torus^1$). The model beats that baseline by $3$--$6\times$ on
+every angle.}
+\label{fig:predictions}
+\end{figure}
 
 \begin{table}[hbt]
 \centering
