@@ -96,7 +96,7 @@ def fig_scaling(out_path: Path) -> None:
         by_mode[mode].sort()
 
     fig, ax = plt.subplots(1, 1, figsize=(6.0, 3.8))
-    order = ["cg2:auto", "cg2:checkpoint_full", "cfees25:reversible"]
+    order = ["cg2:checkpoint_full", "cfees25:reversible"]
     for mode in order:
         items = by_mode.get(mode, [])
         if not items:
@@ -114,6 +114,7 @@ def fig_scaling(out_path: Path) -> None:
         )
 
     ax.set_xscale("log")
+    ax.set_yscale("log")
     ax.set_xlabel(r"integration steps $n_{\mathrm{steps}}$")
     ax.set_ylabel("XLA scratch (MiB, compile-time)")
     ax.set_title(r"Compile-time memory vs. path length ($d=350$, batch $32$)")

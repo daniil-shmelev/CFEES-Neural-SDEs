@@ -42,10 +42,9 @@ across $n_{\mathrm{steps}} \in [5, 800]$, while the non-reversible
 grows linearly from $46.3$ to $80.3\,\mathrm{MiB}$ --- a slope of
 $0.043\,\mathrm{MiB}$ per step, matching the theoretical activation
 tape size $d \cdot B \cdot 4\,\mathrm{bytes}$ to within two percent.
-Training loss is indistinguishable between the two integrators.
-\cfees{} also reaches at least $n_{\mathrm{steps}} = 3000$ where the
-default \texttt{DirectAdjoint}-backed \cgtwo{} fails outright at
-$n_{\mathrm{steps}} \geq 300$.
+Training loss is indistinguishable between the two integrators, and
+\cfees{} reaches at least $n_{\mathrm{steps}} = 3000$ on the same
+model.
 
 \section{Model}
 
@@ -144,7 +143,7 @@ forward+backward training step via
 --- this is the buffer pool the JIT region pre-allocates, and
 excludes weights, optimiser state, and dataset buffers. Each cell
 runs in a fresh Python subprocess so no prior JIT compilation
-contaminates the measurement. We compare three
+contaminates the measurement. We compare two
 (\text{solver},~\text{adjoint}) modes at state dimension $d = 350$
 and batch size $32$:
 \begin{itemize}
@@ -154,42 +153,34 @@ solver reconstructs the forward path during backpropagation, so
 the backward tape is $\mathcal{O}(1)$ in $n_{\mathrm{steps}}$.
 \item \cgtwo{} under
 \texttt{RecursiveCheckpointAdjoint(checkpoints=$n_{\mathrm{steps}}$)}.
-This stores one state snapshot per integration step, which
-corresponds to the naive $\mathcal{O}(n_{\mathrm{steps}})$
-activation tape that the reversible scheme is designed to avoid.
-\item \cgtwo{} under \texttt{DirectAdjoint}. \texttt{diffrax}'s
-default for non-reversible solvers; internally it builds the loop as
-nested \texttt{lax.scan}+\texttt{jax.checkpoint} blocks, which
-gives a fixed constant footprint dictated by the nested scan
-arity, neither $\mathcal{O}(1)$ nor $\mathcal{O}(n_{\mathrm{steps}})$.
+This stores one state snapshot per integration step, which is the
+naive $\mathcal{O}(n_{\mathrm{steps}})$ activation tape that the
+reversible scheme is designed to avoid.
 \end{itemize}
-Figure~\ref{fig:scaling} plots the three modes across
-$n_{\mathrm{steps}} \in \{5, 10, 20, 50, 100, 200, 400, 800\}$.
+Figure~\ref{fig:scaling} plots both modes across
+$n_{\mathrm{steps}} \in \{5, 10, 20, 50, 100, 200, 400, 800\}$ on
+log--log axes.
 
 \begin{figure}[hbt]
 \centering
 \includegraphics[width=0.85\linewidth]{fig_scaling.pdf}
 \caption{XLA compile-time scratch for one forward+backward
-training step on the torus neural SDE at $d=350$, batch $32$, as a
-function of the number of integration steps. Each point is a fresh
-Python subprocess reading
+training step on the torus neural SDE at $d=350$, batch $32$, on
+log--log axes. Each point is a fresh Python subprocess reading
 \texttt{temp\_size\_in\_bytes} off the compiled executable.
 \cfees{} under \texttt{ReversibleAdjoint} (red) is flat at
 $46.5\,\mathrm{MiB}$ across $5 \leq n_{\mathrm{steps}} \leq 800$,
-which is the $\mathcal{O}(1)$ behaviour predicted by reversibility.
+the $\mathcal{O}(1)$ behaviour predicted by reversibility.
 \cgtwo{} under
 \texttt{RecursiveCheckpointAdjoint(checkpoints$=n_{\mathrm{steps}}$)}
 (blue) stores one snapshot per step and grows linearly at a slope
 of $0.043\,\mathrm{MiB}$ per step, matching
 $d \cdot B \cdot 4\,\mathrm{B} = 0.044\,\mathrm{MiB}$ for
-float$32$ activations to within $2\%$. \cgtwo{} under
-\texttt{diffrax}'s default \texttt{DirectAdjoint} (grey) saturates
-at a fixed $\sim\!64.5\,\mathrm{MiB}$ --- higher than
-\cfees{} because of the nested-scan scratch, constant in
-$n_{\mathrm{steps}}$ because the adjoint internally uses recursive
-checkpointing --- and fails outright at $n_{\mathrm{steps}} \geq
-300$ with an assertion inside
-\texttt{equinox.internal.\_loop.bounded}.}
+float$32$ activations to within $2\%$. The log--log presentation
+makes the transition visible: at small $n_{\mathrm{steps}}$ the
+constant non-tape scratch dominates and the blue curve sits on top
+of the red one, then rolls over onto an asymptotic slope of one as
+the tape term takes over.}
 \label{fig:scaling}
 \end{figure}
 
@@ -207,18 +198,18 @@ training step at $d = 350$, batch $32$, hidden $128$,
 $\mathrm{d}t = 0.05$. ``ratio'' is
 CG2$:$checkpoint\_full divided by CFEES25$:$reversible.}
 \label{tab:scaling}
-\begin{tabular}{r rrr r}
+\begin{tabular}{r rr r}
 \toprule
-$n_{\mathrm{steps}}$ & CFEES25+rev & CG2+ckpt-full & CG2+DirectAdj & ratio \\
+$n_{\mathrm{steps}}$ & CFEES25+reversible & CG2+checkpoint-full & ratio \\
 \midrule
-  $5$ & $\mathbf{46.5}$ & $46.3$ &  $54.2$ & $1.00\times$ \\
- $10$ & $\mathbf{46.5}$ & $46.5$ &  $64.5$ & $1.00\times$ \\
- $20$ & $\mathbf{46.2}$ & $46.8$ &  $64.5$ & $1.01\times$ \\
- $50$ & $\mathbf{46.2}$ & $48.2$ &  $64.5$ & $1.04\times$ \\
-$100$ & $\mathbf{46.6}$ & $50.6$ &  $64.5$ & $1.09\times$ \\
-$200$ & $\mathbf{46.5}$ & $54.6$ &  $64.5$ & $1.17\times$ \\
-$400$ & $\mathbf{46.5}$ & $63.2$ &  fail   & $1.36\times$ \\
-$800$ & $\mathbf{46.5}$ & $80.3$ &  fail   & $1.73\times$ \\
+  $5$ & $\mathbf{46.5}$ & $46.3$ & $1.00\times$ \\
+ $10$ & $\mathbf{46.5}$ & $46.5$ & $1.00\times$ \\
+ $20$ & $\mathbf{46.2}$ & $46.8$ & $1.01\times$ \\
+ $50$ & $\mathbf{46.2}$ & $48.2$ & $1.04\times$ \\
+$100$ & $\mathbf{46.6}$ & $50.6$ & $1.09\times$ \\
+$200$ & $\mathbf{46.5}$ & $54.6$ & $1.17\times$ \\
+$400$ & $\mathbf{46.5}$ & $63.2$ & $1.36\times$ \\
+$800$ & $\mathbf{46.5}$ & $80.3$ & $1.73\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
