@@ -474,13 +474,10 @@ def fig_predictions(out_path: Path) -> None:
 
     The left and centre panels overlay ``(\\delta, \\chi)`` and
     ``(\\alpha, \\gamma)`` scatter plots of the held-out test targets
-    with the model's one-step predictions, on the same
+    with the model's one-step predictions on the same
     $(-\\pi, \\pi]^2$ patch of the torus. The right panel compares the
-    model's per-angle wrapped MAE against the train-set circular mean
-    on the 42 percent of test residues that sit farther than
-    one radian from that mean -- the regime where the circular-mean
-    baseline is least informative and the model can actually exploit
-    the context window.
+    model's per-angle wrapped MAE against the predict-previous-residue
+    and training circular-mean baselines on the full test set.
     """
     loaded = _load_predictions()
     if loaded is None:
@@ -500,27 +497,14 @@ def fig_predictions(out_path: Path) -> None:
 
     baselines = _load_rna_baselines(context, actual.shape[0], max_chains=1000)
 
-    non_canonical_threshold = 1.0
-    if baselines is not None and "train_mean" in baselines:
-        circ_mean_broadcast = baselines["train_mean"]
-        dist_to_mean = np.linalg.norm(
-            _wrapped_diff(actual, circ_mean_broadcast), axis=1
-        )
-        non_canonical = dist_to_mean >= non_canonical_threshold
-    else:
-        non_canonical = np.ones(actual.shape[0], dtype=bool)
+    def _mae(pred: np.ndarray) -> np.ndarray:
+        return np.mean(np.abs(_wrapped_diff(pred, actual)), axis=0)
 
-    n_non = int(non_canonical.sum())
-    frac_non = n_non / max(actual.shape[0], 1)
-
-    def _mae_on(mask: np.ndarray, pred: np.ndarray) -> np.ndarray:
-        return np.mean(np.abs(_wrapped_diff(pred[mask], actual[mask])), axis=0)
-
-    model_mae_non = _mae_on(non_canonical, predicted)
-    baseline_mae_non: dict[str, np.ndarray] = {}
+    model_mae = _mae(predicted)
+    baseline_mae: dict[str, np.ndarray] = {}
     if baselines is not None:
         for name, pred in baselines.items():
-            baseline_mae_non[name] = _mae_on(non_canonical, pred)
+            baseline_mae[name] = _mae(pred)
 
     fig = plt.figure(figsize=(10.4, 3.6))
     grid = fig.add_gridspec(1, 3, width_ratios=[1.0, 1.0, 1.15], wspace=0.38)
@@ -537,12 +521,12 @@ def fig_predictions(out_path: Path) -> None:
     ax2 = fig.add_subplot(grid[0, 2])
     positions = np.arange(len(ANGLE_NAMES))
 
-    bar_bundle = [("CFEES25", model_mae_non, "#d62728")]
-    if "prev" in baseline_mae_non:
-        bar_bundle.append(("previous residue", baseline_mae_non["prev"], "#1f77b4"))
-    if "train_mean" in baseline_mae_non:
+    bar_bundle = [("CFEES25", model_mae, "#d62728")]
+    if "prev" in baseline_mae:
+        bar_bundle.append(("previous residue", baseline_mae["prev"], "#1f77b4"))
+    if "train_mean" in baseline_mae:
         bar_bundle.append(
-            ("train circular mean", baseline_mae_non["train_mean"], "#2ca02c")
+            ("train circular mean", baseline_mae["train_mean"], "#2ca02c")
         )
 
     n_bars = len(bar_bundle)
@@ -562,9 +546,7 @@ def fig_predictions(out_path: Path) -> None:
     ax2.set_xticks(positions)
     ax2.set_xticklabels(ANGLE_SYMBOLS, fontsize=10)
     ax2.set_ylabel("wrapped MAE (rad)")
-    ax2.set_title(
-        f"non-canonical residues ({100 * frac_non:.0f}%, n={n_non})"
-    )
+    ax2.set_title(f"per-angle test error (n={actual.shape[0]})")
     ax2.set_ylim(0, y_max * 1.22)
     ax2.grid(axis="y", alpha=0.3)
     ax2.legend(loc="upper right", fontsize=7, frameon=True, ncol=1)

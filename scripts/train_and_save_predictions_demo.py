@@ -35,7 +35,7 @@ OUT_PATH = PROJECT_ROOT / "results" / "rna_predictions_demo.npz"
 def main() -> int:
     config = make_config(
         experiment=Experiments.RNA,
-        epochs=80,
+        epochs=20,
         batch_size=64,
         learning_rate=1e-4,
         seed=0,
@@ -53,8 +53,8 @@ def main() -> int:
     n_mc_samples = 16
     warmup_steps = 1000
     weight_decay = 1e-4
-    use_energy_score = False
-    energy_score_samples = 8
+    use_energy_score = True
+    energy_score_samples = 4
 
     train_ds = RNATorsionDataset(
         split="train",

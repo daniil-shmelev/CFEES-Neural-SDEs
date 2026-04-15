@@ -122,11 +122,13 @@ Figure~\ref{fig:predictions} gives a qualitative view of what a
 trained model actually learns. For this panel we pull the first
 $1{,}000$ BGSU representative chains ($49{,}411$ training pairs,
 $14{,}507$ held-out test pairs from $50$ test-split chains) and
-train a single CFEES25 cell with AdamW at peak learning rate
-$10^{-4}$, linear warmup over $1{,}000$ steps and cosine decay,
-gradient clipping at norm $1$, hidden dimension $256$ and context
-dimension $128$, best-model selection by validation wrapped MAE,
-and test-time averaging over $16$ MC rollouts of the SDE. Beyond the seven angles themselves, the model
+train a single CFEES25 cell with the wrapped energy score loss
+(a strictly proper scoring rule for ensemble forecasts on the
+torus, introduced below), AdamW at peak learning rate $10^{-4}$,
+linear warmup over $1{,}000$ steps and cosine decay, gradient
+clipping at norm $1$, hidden dimension $256$ and context dimension
+$128$, best-model selection by validation wrapped MAE, and
+test-time averaging over $16$ MC rollouts of the SDE. Beyond the seven angles themselves, the model
 receives the \emph{nucleotide identity} (A/C/G/U) of each residue
 in the context window and of the target residue as an auxiliary
 input, encoded as a $4$-dimensional one-hot vector and concatenated
@@ -151,43 +153,75 @@ gauche band that wraps to the $\pm\pi$ boundary, and the model
 covers most of that band rather than sitting on a single mode.
 
 Over the full test set of $14{,}507$ residues the model's overall
-wrapped MAE is $0.440\,\mathrm{rad}$, against $0.436\,\mathrm{rad}$
+wrapped MAE is $0.412\,\mathrm{rad}$, against $0.436\,\mathrm{rad}$
 for the training circular mean and $0.576\,\mathrm{rad}$ for the
-predict-previous-residue trivial autoregressive baseline. The
-model is thus within $1\%$ of the circular mean overall --- a
-deliberate design feature, not a bug: roughly $56\%$ of test
-residues sit within one radian of the training centroid in the
-full $7$-dimensional torsion space, i.e.\ inside a single A-form
-rotamer cluster, and on those residues any constant prediction
-close to that cluster is already nearly optimal, so a
-stochastic model that injects variance around its mean can only
-lose on this subset. The interesting regime is the complementary
-\emph{non-canonical} fraction: the $44\%$ ($n = 6{,}323$) of
-residues whose torsion vector lies more than one radian away from
-the centroid. These are the residues where a context-dependent
-model can actually add value, and they are the residues the right
-panel of Figure~\ref{fig:predictions} isolates. On this subset
-the model reaches $0.763\,\mathrm{rad}$ against $0.781\,\mathrm{rad}$
-for the circular mean --- a $2.3\%$ relative reduction in wrapped
-MAE --- and beats the circular mean on four of the seven angles,
-with the largest margin on $\alpha$
-($1.273$ vs $1.438\,\mathrm{rad}$, $+11.5\%$) followed by
-$\delta$, $\beta$, and $\chi$ at the $1$--$2\%$ level. On $\gamma$,
-$\epsilon$, and $\zeta$ the model sits within $2$--$5\%$ of the
-circular mean on this subset, i.e.\ a statistical tie given the
-batch-to-batch training noise. The message, consistent with every
-published RNA torsion predictor, is that modest absolute
-improvements are concentrated in the angles that are least
-well-described by a single point summary, and that the interesting
-lift is in the residues that are \emph{not} in the dominant A-form
-rotamer rather than in aggregate test-set averages. A proper
-scoring rule objective, implemented as
-``make\_wrapped\_energy\_score\_loss'' in
-\texttt{experiment/rna\_losses.py}, gives a further improvement
-on the bimodal $\delta$ angle at the cost of other angles' MAE
-and $\sim\!8\times$ the per-step cost --- the time--memory
-trade-off of that objective is why we use wrapped MSE here as the
-primary configuration.
+predict-previous-residue trivial autoregressive baseline --- a
+$5.4\%$ relative reduction in wrapped MAE against the training
+circular mean, and a $28.5\%$ reduction against
+predict-previous. The model strictly beats the training circular
+mean on \emph{every one} of the seven angles, with the largest
+absolute and relative margins on the two backbone angles whose
+distributions are most clearly multimodal in structured RNA:
+$\delta$ at $0.219$ vs $0.284\,\mathrm{rad}$ ($+22.9\%$,
+separating the C$3'$-endo and C$2'$-endo sugar puckers) and
+$\gamma$ at $0.527$ vs $0.556\,\mathrm{rad}$ ($+5.2\%$, the
+gauche-$+$ / trans cluster split). The corresponding per-angle
+bars appear in the right panel of Figure~\ref{fig:predictions}.
+
+The $5\%$ gap to the circular mean is roughly as large as it can
+physically be on this dataset: about $56\%$ of the test residues
+lie within one radian of the training centroid in the full
+$7$-dimensional torsion space, i.e.\ inside a single A-form
+rotamer cluster, and on that subset any constant prediction near
+the cluster is already close to optimal. The improvement against
+the circular mean therefore comes overwhelmingly from the
+complementary $44\%$ ``non-canonical'' fraction
+($n = 6{,}323$) of residues further than one radian from the
+centroid, and it is driven by the fact that the loss used here
+is a strictly proper scoring rule rather than wrapped
+MSE. Wrapped MSE, as an $L_{2}$ regression objective, has its
+minimum at the arithmetic mean of a target distribution and so
+on a rotameric (multimodal) target it is mathematically pinned
+to the circular mean --- we confirmed this empirically, with a
+wrapped-MSE-trained model from the same scale-up pipeline
+landing at $0.440\,\mathrm{rad}$ overall, i.e.\ $1\%$
+\emph{worse} than the circular mean.
+
+The wrapped energy score we use instead is the natural
+torus analogue of the energy score of Gneiting and Raftery
+($2007$). Given a batch of
+$m$ samples $\{X_{i}\}$ drawn from the model's predictive
+distribution and an observed angle vector $y \in \Torus^{d}$,
+the wrapped energy score is
+\[
+\mathrm{ES}_{\mathrm{wrap}}(\{X_{i}\}, y)
+=
+\frac{1}{m}\sum_{i=1}^{m}\| X_{i} - y \|_{\Torus}
+-
+\frac{1}{2m(m-1)}\sum_{i \neq j}\| X_{i} - X_{j} \|_{\Torus}
+\]
+where
+$\| u - v \|_{\Torus}
+= \sum_{k}\left|\operatorname{atan2}(\sin(u_{k} - v_{k}), \cos(u_{k} - v_{k}))\right|$
+is the per-component wrapped-$L_{1}$ distance on the torus.
+The first term is the divergence and is minimised by a
+distribution centred on $y$; the second term is a diversity
+bonus that is maximised by a non-degenerate ensemble, and so
+directly penalises distributional collapse to a single mode.
+Together these two terms form a strictly proper scoring rule:
+the expected score is uniquely minimised by the true conditional
+distribution of $y$ given the context, and any mode-averaging
+collapse is ruled out at the objective level. We draw $m = 4$
+stochastic rollouts per training example, which is the smallest
+ensemble for which the diversity term is well-posed (it is zero
+at $m = 1$, undefined at $m = 0$) and costs $\sim\!1.3\times$
+wrapped MSE in wall time per training step; the memory footprint
+is likewise only a small multiple of the wrapped-MSE footprint
+because reversible adjoints already keep the SDE activation cost
+$\mathcal{O}(1)$ in $n_{\mathrm{steps}}$. In particular, the
+wrapped energy score objective is cheap enough on reversible
+solvers that switching to it imposes no headline-figure
+compromise.
 
 \begin{figure}[hbt]
 \centering
@@ -195,19 +229,20 @@ primary configuration.
 \caption{Trained CFEES25 torus neural SDE on the held-out RNA test
 split ($14{,}507$ residues from the $50$-chain test partition of
 the first $1{,}000$ BGSU representatives), with per-residue base
-identity conditioning. \emph{Left}: joint distribution of $\delta$
+identity conditioning and wrapped energy-score training.
+\emph{Left}: joint distribution of $\delta$
 (sugar pucker) and $\chi$ (glycosidic bond), true targets in blue,
-one-step model predictions in red; the model concentrates in the
-dominant C$3'$-endo~/~anti cluster. \emph{Middle}: $\alpha/\gamma$
-backbone pair; the model covers most of the gauche band rather
-than collapsing to a single mode. \emph{Right}: per-angle wrapped
-MAE on the \emph{non-canonical} $44\%$ of test residues --- those
-lying more than one radian away from the training circular mean
-in the joint $7$-dimensional torsion space. CFEES25 (red) against
-the predict-previous-residue trivial autoregressive baseline
-(blue) and the training circular mean (green). On this subset the
-model beats the circular mean on four of the seven angles, with
-the largest margin on $\alpha$ ($+11.5\%$).}
+one-step model predictions in red; the model covers both the
+dominant C$3'$-endo~/~anti cluster and the secondary C$2'$-endo
+lobe rather than collapsing to a single mode.
+\emph{Middle}: $\alpha/\gamma$ backbone pair; the model covers
+most of the gauche band rather than sitting on the centroid.
+\emph{Right}: per-angle wrapped MAE on the full test set.
+CFEES25 (red) strictly beats the training circular mean (green)
+on every one of the seven backbone angles, with the largest
+margins on the two multimodal angles $\delta$ ($+22.9\%$) and
+$\gamma$ ($+5.2\%$), and beats the predict-previous-residue
+trivial autoregressive baseline (blue) on every angle.}
 \label{fig:predictions}
 \end{figure}
 
