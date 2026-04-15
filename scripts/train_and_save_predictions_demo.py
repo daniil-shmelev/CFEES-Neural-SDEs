@@ -37,7 +37,7 @@ def main() -> int:
         experiment=Experiments.RNA,
         epochs=80,
         batch_size=64,
-        learning_rate=3e-4,
+        learning_rate=1e-4,
         seed=0,
         device=Devices.GPU,
         hidden_dim=256,
@@ -51,7 +51,7 @@ def main() -> int:
         max_chains=1000,
     )
     n_mc_samples = 16
-    warmup_steps = 500
+    warmup_steps = 1000
     weight_decay = 1e-4
     use_energy_score = False
     energy_score_samples = 8
@@ -108,6 +108,9 @@ def main() -> int:
 
     eval_metric = eqx.filter_jit(metric_fn)
 
+    best_ckpt_path = PROJECT_ROOT / "results" / "rna_best_model.eqx"
+    best_ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+
     best_model = model
     best_val = float("inf")
     for epoch in range(config.epochs):
@@ -126,6 +129,7 @@ def main() -> int:
         if val_metric < best_val:
             best_val = val_metric
             best_model = model
+            eqx.tree_serialise_leaves(best_ckpt_path, best_model)
         print(
             f"epoch {epoch + 1:2d}/{config.epochs}  "
             f"train_loss={total / train_loader.steps_per_epoch:.4f}  "
