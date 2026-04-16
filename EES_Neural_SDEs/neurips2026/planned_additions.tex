@@ -1,0 +1,72 @@
+\documentclass{article}
+\usepackage{hyperref}
+\usepackage{amsmath,amssymb}
+
+\begin{document}
+
+\section{Main narrative additions}
+\begin{itemize}
+    \item We introduce a family of effectively symmetric integrators extending the Euclidean RDE/SDE constructions of Shmelev to general parallelizable manifold settings.
+    
+    \item We identify a natural low-memory formulation of these methods, and show that in the manifold setting it is compute-optimal in the sense of using the minimal number of exponential evaluations.
+    
+    \item We provide software support in the JAX ecosystem for constructing, testing, and running efficient manifold neural differential equation solvers.
+    
+    \item A substantial manifold component probably needs some rewrite since it changes technical framing and the experimental narrative of the paper.
+\end{itemize}
+
+\section{Experiments}
+\begin{enumerate}
+    \item \textbf{OU process / practical stochastic benchmark}
+    \begin{itemize}
+        \item Consider replacing this with rough Bergomi.
+        \item This would respond more directly to the reviewers' concerns about practical relevance.
+        \item The implementation is already available.
+        \item Possible evaluation metric: signature-kernel-based score.
+    \end{itemize}
+
+    \item \textbf{High-dimensional GBM}
+    \begin{itemize}
+        \item Possibly replace this with rough Bergomi as well.
+        \item Otherwise, keep this experiment and emphasise the stiff regime clearly.
+    \end{itemize}
+
+    \item \textbf{Manifold ODE task}
+    \begin{itemize}
+        \item Candidate practically motivated task: \url{https://arxiv.org/abs/2506.06780}.
+        \item The implementation is already available.
+        \item This would help motivate the geometric extension beyond being a purely formal generalisation.
+    \end{itemize}
+
+    \item \textbf{Manifold SDE task}
+    \begin{itemize}
+        \item One candidate is an affine-invariant OU-type It\^o diffusion on $S_d^{++}$:
+        \[
+        \mathrm dX_t
+        =
+        \eta\,\log_{X_t}(M)\,\mathrm dt
+        +
+        \sigma\,X_t^{1/2}\,\mathrm dB_t\,X_t^{1/2},
+        \qquad
+        X_0 \in S_d^{++}.
+        \]
+        
+        \item This has some motivation from applications in finance.
+        
+        \item It would also enable a clean comparison against manifold log-ODE approaches, which are much slower.
+        
+        \item Other possible directions include topological or Riemannian Schr\"odinger bridge tasks, or more general Riemannian diffusion benchmarks.
+    \end{itemize}
+\end{enumerate}
+
+\section{Rewrite issues}
+\begin{itemize}
+    \item If the manifold contribution is made central, then the paper may need to be repositioned as a broader geometric integration paper rather than as a lighter revision of the rejected submission.
+    
+    \item Manifold material may be better framed as a major extension supported by one strong experiment, rather than as the primary narrative.
+\end{itemize}
+
+\bibliographystyle{plain}
+\bibliography{neurips2026/neurips_references}
+
+\end{document}

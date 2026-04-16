@@ -48,6 +48,9 @@ def make_loader(
                 split=split,
                 context_length=config.context_length,
                 residues_per_state=config.residues_per_state,
+                future_bases_window=config.future_bases_window,
+                filter_canonical=config.filter_canonical,
+                canonical_threshold=config.canonical_threshold,
                 max_chains=config.max_chains,
             ).make_array_source()
             return DataLoader(
@@ -94,6 +97,11 @@ def make_model(
                 solver=build_solver(config.solver),
                 diffusion_scale=config.diffusion_scale,
                 residues_per_state=config.residues_per_state,
+                future_bases_window=config.future_bases_window,
+                future_ctx_dim=config.future_ctx_dim,
+                activation=config.activation,
+                drift_depth=config.drift_depth,
+                diffusion_depth=config.diffusion_depth,
                 key=key,
             )
         case _:

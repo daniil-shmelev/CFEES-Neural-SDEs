@@ -25,18 +25,36 @@ ANGLE_SYMBOLS = (
     r"$\epsilon$", r"$\zeta$", r"$\chi$",
 )
 
-plt.rcParams.update(
-    {
-        "font.size": 10,
-        "axes.labelsize": 10,
-        "axes.titlesize": 11,
-        "legend.fontsize": 9,
-        "figure.dpi": 150,
-        "savefig.dpi": 300,
-        "savefig.bbox": "tight",
-        "font.family": "serif",
-    }
-)
+def _set_stix_params(small: int = 7, medium: int = 8, bigger: int = 9) -> None:
+    """STIX font styling for NeurIPS-quality figures."""
+    plt.rcParams["mathtext.fontset"] = "stix"
+    plt.rcParams["font.family"] = "STIXGeneral"
+    plt.rc("font", size=small)
+    plt.rc("axes", titlesize=bigger)
+    plt.rc("axes", labelsize=medium)
+    plt.rc("xtick", labelsize=small)
+    plt.rc("ytick", labelsize=small)
+    plt.rc("legend", fontsize=small)
+    plt.rc("figure", titlesize=bigger)
+
+
+def _set_default_params() -> None:
+    """Default report-quality styling (larger fonts)."""
+    plt.rcParams.update(
+        {
+            "font.size": 10,
+            "axes.labelsize": 10,
+            "axes.titlesize": 11,
+            "legend.fontsize": 9,
+            "figure.dpi": 150,
+            "savefig.dpi": 300,
+            "savefig.bbox": "tight",
+            "font.family": "serif",
+        }
+    )
+
+
+_set_default_params()
 
 SOLVER_LABEL = {"cg2": "CG2", "cfees25": "CFEES25", "cg4": "CG4", "cfees27": "CFEES27"}
 SOLVER_COLOR = {
@@ -412,7 +430,10 @@ def _load_predictions() -> tuple[np.ndarray, np.ndarray, np.ndarray | None] | No
 
 
 def _load_rna_baselines(
-    context: np.ndarray | None, n_test: int, max_chains: int
+    context: np.ndarray | None,
+    n_test: int,
+    max_chains: int,
+    filter_canonical: bool = False,
 ) -> dict[str, np.ndarray] | None:
     """Return baseline predictions aligned with the test targets.
 
@@ -432,6 +453,7 @@ def _load_rna_baselines(
             max_chains=max_chains,
             context_length=20,
             residues_per_state=1,
+            filter_canonical=filter_canonical,
         )
     except Exception:  # noqa: BLE001
         return baselines or None
@@ -447,15 +469,24 @@ def _load_rna_baselines(
 
 def _torus_scatter(ax, true_xy: np.ndarray, pred_xy: np.ndarray, x_label: str, y_label: str) -> None:
     """Overlay true and predicted samples in $(-\\pi, \\pi]^2$ with translucent dots."""
-    ax.scatter(
-        true_xy[:, 0], true_xy[:, 1],
-        s=22, color="#1f77b4", alpha=0.45,
-        edgecolors="none", label="test targets",
-    )
+    # Subsample for readability when many points.
+    max_pts = 2000
+    rng = np.random.RandomState(0)
+    if len(true_xy) > max_pts:
+        idx = rng.choice(len(true_xy), max_pts, replace=False)
+        true_xy = true_xy[idx]
+        pred_xy = pred_xy[idx]
+    # Draw predictions first (underneath), targets on top so the true
+    # distribution structure is visible through the overlay.
     ax.scatter(
         pred_xy[:, 0], pred_xy[:, 1],
-        s=22, color="#d62728", alpha=0.45,
-        edgecolors="none", label="CFEES25 predictions",
+        s=10, color="#d62728", alpha=0.30, zorder=2,
+        edgecolors="none", label="CFEES25 predictions", rasterized=True,
+    )
+    ax.scatter(
+        true_xy[:, 0], true_xy[:, 1],
+        s=6, color="#1f77b4", alpha=0.50, zorder=3,
+        edgecolors="none", label="test targets", rasterized=True,
     )
     ax.set_xlim(-np.pi, np.pi)
     ax.set_ylim(-np.pi, np.pi)
@@ -469,7 +500,51 @@ def _torus_scatter(ax, true_xy: np.ndarray, pred_xy: np.ndarray, x_label: str, y
     ax.grid(True, alpha=0.25)
 
 
-def fig_predictions(out_path: Path) -> None:
+def _draw_mae_bars(
+    ax,
+    bar_bundle: list[tuple[str, np.ndarray, str]],
+    *,
+    y_headroom: float = 1.20,
+) -> None:
+    """Draw a grouped per-angle MAE bar chart on *ax*."""
+    positions = np.arange(len(ANGLE_NAMES))
+    n_bars = len(bar_bundle)
+    group_width = 0.78
+    bar_width = group_width / n_bars
+    for i, (label, values, color) in enumerate(bar_bundle):
+        offset = (i - (n_bars - 1) / 2) * bar_width
+        ax.bar(positions + offset, values, width=bar_width, color=color, label=label)
+    y_max = max(float(np.max(v)) for _, v, _ in bar_bundle)
+    ax.set_xticks(positions)
+    ax.set_xticklabels(ANGLE_SYMBOLS)
+    ax.set_ylabel("wrapped MAE (rad)")
+    ax.set_ylim(0, y_max * y_headroom)
+    ax.grid(axis="y", alpha=0.3)
+    ax.legend(loc="upper right", frameon=True, ncol=1)
+
+
+def _build_bar_bundle(
+    predicted: np.ndarray,
+    actual: np.ndarray,
+    baselines: dict[str, np.ndarray] | None,
+    *,
+    prev_label: str = "previous residue",
+    mean_label: str = "train circular mean",
+) -> list[tuple[str, np.ndarray, str]]:
+    """Build ``(label, per-angle MAE, colour)`` tuples for bar chart."""
+    def _mae(pred: np.ndarray) -> np.ndarray:
+        return np.mean(np.abs(_wrapped_diff(pred, actual)), axis=0)
+
+    bundle: list[tuple[str, np.ndarray, str]] = [("CFEES25", _mae(predicted), "#d62728")]
+    if baselines is not None:
+        if "prev" in baselines:
+            bundle.append((prev_label, _mae(baselines["prev"]), "#1f77b4"))
+        if "train_mean" in baselines:
+            bundle.append((mean_label, _mae(baselines["train_mean"]), "#2ca02c"))
+    return bundle
+
+
+def fig_predictions(out_path: Path, baselines: dict[str, np.ndarray] | None = None) -> None:
     """Visualise a trained CFEES25 torus neural SDE on the test set.
 
     The left and centre panels overlay ``(\\delta, \\chi)`` and
@@ -495,16 +570,12 @@ def fig_predictions(out_path: Path) -> None:
     true_dc, pred_dc = _pair("delta", "chi")
     true_ag, pred_ag = _pair("alpha", "gamma")
 
-    baselines = _load_rna_baselines(context, actual.shape[0], max_chains=1000)
+    if baselines is None:
+        baselines = _load_rna_baselines(
+            context, actual.shape[0], max_chains=3000, filter_canonical=True
+        )
 
-    def _mae(pred: np.ndarray) -> np.ndarray:
-        return np.mean(np.abs(_wrapped_diff(pred, actual)), axis=0)
-
-    model_mae = _mae(predicted)
-    baseline_mae: dict[str, np.ndarray] = {}
-    if baselines is not None:
-        for name, pred in baselines.items():
-            baseline_mae[name] = _mae(pred)
+    bar_bundle = _build_bar_bundle(predicted, actual, baselines)
 
     fig = plt.figure(figsize=(10.4, 3.6))
     grid = fig.add_gridspec(1, 3, width_ratios=[1.0, 1.0, 1.15], wspace=0.38)
@@ -512,46 +583,162 @@ def fig_predictions(out_path: Path) -> None:
     ax0 = fig.add_subplot(grid[0, 0])
     _torus_scatter(ax0, true_dc, pred_dc, r"$\delta$ (rad)", r"$\chi$ (rad)")
     ax0.set_title(r"sugar pucker / glycosidic bond")
-    ax0.legend(loc="lower right", fontsize=7, frameon=True, markerscale=1.2)
+    ax0.legend(loc="lower right", fontsize=6.5, frameon=True, framealpha=0.9,
+               markerscale=1.5, handletextpad=0.3, borderpad=0.3)
 
     ax1 = fig.add_subplot(grid[0, 1])
     _torus_scatter(ax1, true_ag, pred_ag, r"$\alpha$ (rad)", r"$\gamma$ (rad)")
     ax1.set_title(r"backbone $\alpha/\gamma$ pair")
 
     ax2 = fig.add_subplot(grid[0, 2])
-    positions = np.arange(len(ANGLE_NAMES))
-
-    bar_bundle = [("CFEES25", model_mae, "#d62728")]
-    if "prev" in baseline_mae:
-        bar_bundle.append(("previous residue", baseline_mae["prev"], "#1f77b4"))
-    if "train_mean" in baseline_mae:
-        bar_bundle.append(
-            ("train circular mean", baseline_mae["train_mean"], "#2ca02c")
-        )
-
-    n_bars = len(bar_bundle)
-    group_width = 0.78
-    bar_width = group_width / n_bars
-    for i, (label, values, color) in enumerate(bar_bundle):
-        offset = (i - (n_bars - 1) / 2) * bar_width
-        ax2.bar(
-            positions + offset,
-            values,
-            width=bar_width,
-            color=color,
-            label=label,
-        )
-
-    y_max = max(float(np.max(values)) for _, values, _ in bar_bundle)
-    ax2.set_xticks(positions)
+    _draw_mae_bars(ax2, bar_bundle, y_headroom=1.22)
     ax2.set_xticklabels(ANGLE_SYMBOLS, fontsize=10)
-    ax2.set_ylabel("wrapped MAE (rad)")
-    ax2.set_title(f"per-angle test error (n={actual.shape[0]})")
-    ax2.set_ylim(0, y_max * 1.22)
-    ax2.grid(axis="y", alpha=0.3)
+    ax2.set_title(f"non-canonical test error (n={actual.shape[0]})")
     ax2.legend(loc="upper right", fontsize=7, frameon=True, ncol=1)
 
     fig.savefig(out_path, bbox_inches="tight", pad_inches=0.08)
+    plt.close(fig)
+
+
+def fig_predictions_bar_only(out_path: Path, baselines: dict[str, np.ndarray] | None = None) -> None:
+    """Standalone per-angle MAE bar chart for the NeurIPS manuscript."""
+    _set_stix_params(7, 8, 9)
+    try:
+        loaded = _load_predictions()
+        if loaded is None:
+            return
+        predicted, actual, context = loaded
+
+        if baselines is None:
+            baselines = _load_rna_baselines(
+                context, actual.shape[0], max_chains=3000, filter_canonical=True
+            )
+
+        bar_bundle = _build_bar_bundle(
+            predicted, actual, baselines,
+            prev_label="prev. residue", mean_label="circular mean",
+        )
+
+        fig, ax = plt.subplots(figsize=(3.2, 2.2))
+        _draw_mae_bars(ax, bar_bundle, y_headroom=1.18)
+        fig.savefig(out_path, bbox_inches="tight", pad_inches=0.04)
+        plt.close(fig)
+    finally:
+        _set_default_params()
+
+
+def fig_scaling_compact(out_path: Path) -> None:
+    """Compact memory-scaling plot for the NeurIPS manuscript."""
+    _set_stix_params(7, 8, 9)
+    try:
+        if not SCALING_JSON.exists():
+            return
+        with SCALING_JSON.open() as f:
+            raw = json.load(f)
+        data = list(raw.values()) if isinstance(raw, dict) else raw
+
+        fig, ax = plt.subplots(figsize=(3.2, 2.2))
+        for solver_key, label, color, marker in [
+            ("cfees25", "CFEES25 (reversible)", "#d62728", "o"),
+            ("cg2", "CG2 (checkpoint)", "#1f77b4", "s"),
+            ("cg4", "CG4 (checkpoint)", "#2ca02c", "^"),
+        ]:
+            entries = [e for e in data if e.get("solver") == solver_key]
+            if not entries:
+                continue
+            entries.sort(key=lambda e: e["n_steps"])
+            steps = [e["n_steps"] for e in entries]
+            mem = [e["temp_bytes"] / (1024**2) for e in entries]
+            ax.plot(steps, mem, marker=marker, markersize=3, linewidth=1.2,
+                    color=color, label=label)
+
+        ax.set_xlabel(r"$n_{\mathrm{steps}}$")
+        ax.set_ylabel("XLA scratch (MiB)")
+        ax.grid(True, alpha=0.25)
+        ax.legend(loc="upper left", frameon=True)
+
+        fig.savefig(out_path, bbox_inches="tight", pad_inches=0.04)
+        plt.close(fig)
+    finally:
+        _set_default_params()
+
+
+def fig_trajectory_compact(out_path: Path) -> None:
+    """Compact torus trajectory for the NeurIPS manuscript."""
+    _set_stix_params(7, 8, 9)
+    try:
+        _fig_trajectory_compact_inner(out_path)
+    finally:
+        _set_default_params()
+
+
+def _fig_trajectory_compact_inner(out_path: Path) -> None:
+    R, r = 2.0, 0.7
+    n_steps = 800
+    dt = 0.007
+    sigma = 0.38
+
+    rng = np.random.RandomState(17)
+    theta = np.zeros(n_steps + 1)
+    phi = np.zeros(n_steps + 1)
+    theta[0], phi[0] = 0.2, 0.0
+    drift_theta, drift_phi = 0.55, 0.25
+    for i in range(n_steps):
+        theta[i + 1] = theta[i] + drift_theta * dt + sigma * np.sqrt(dt) * rng.randn()
+        phi[i + 1] = phi[i] + drift_phi * dt + sigma * np.sqrt(dt) * rng.randn()
+
+    x = (R + r * np.cos(phi)) * np.cos(theta)
+    y = (R + r * np.cos(phi)) * np.sin(theta)
+    z = r * np.sin(phi)
+
+    # Wireframe mesh on the torus surface.
+    n_u, n_v = 28, 14
+    u_ring = np.linspace(0, 2 * np.pi, n_u)
+    v_ring = np.linspace(0, 2 * np.pi, n_v)
+    U, V = np.meshgrid(u_ring, v_ring)
+    X_s = (R + r * np.cos(V)) * np.cos(U)
+    Y_s = (R + r * np.cos(V)) * np.sin(U)
+    Z_s = r * np.sin(V)
+
+    fig = plt.figure(figsize=(3.0, 1.8))
+    ax = fig.add_subplot(111, projection="3d")
+    ax.set_position([-0.15, -0.35, 1.30, 1.60])  # [left, bottom, w, h] in figure coords
+    ax.plot_surface(
+        X_s, Y_s, Z_s, alpha=0.08, color="#f0f0f0",
+        edgecolor="#aaaaaa", linewidth=0.25, rasterized=True,
+    )
+
+    # Break polyline at wrap boundaries.
+    theta_w = np.mod(theta + np.pi, 2 * np.pi) - np.pi
+    phi_w = np.mod(phi + np.pi, 2 * np.pi) - np.pi
+    breaks = np.where(
+        (np.abs(np.diff(theta_w)) > np.pi) | (np.abs(np.diff(phi_w)) > np.pi)
+    )[0]
+    segments = np.split(np.arange(len(x)), breaks + 1)
+    for seg in segments:
+        if len(seg) < 2:
+            continue
+        ax.plot(x[seg], y[seg], z[seg], color="#d62728", linewidth=0.55, alpha=0.8)
+
+    ax.scatter(x[0], y[0], z[0], color="#2ca02c", s=45,
+               depthshade=False, label="Start", zorder=5,
+               edgecolors="white", linewidths=0.5)
+    ax.scatter(x[-1], y[-1], z[-1], color="#1f77b4", s=45,
+               depthshade=False, label="End", zorder=5,
+               edgecolors="white", linewidths=0.5)
+
+    crop = 0.75  # zoom factor: smaller = tighter crop
+    limit = (R + r) * crop
+    ax.set_xlim(-limit, limit)
+    ax.set_ylim(-limit, limit)
+    ax.set_zlim(-r * 0.9, r * 0.9)
+    ax.set_box_aspect((1.0, 1.0, 0.30))
+    ax.set_axis_off()
+    ax.view_init(elev=22, azim=-60)
+    ax.legend(loc="upper left", frameon=False, fontsize=8,
+              bbox_to_anchor=(-0.05, 1.05), markerscale=1.0,
+              handletextpad=0.3, borderpad=0.1)
+    fig.savefig(out_path, pad_inches=0.0, dpi=300)
     plt.close(fig)
 
 
@@ -561,7 +748,21 @@ def main() -> int:
     fig_hlo_scratch(REPORT_DIR / "fig_hlo_scratch.pdf")
     fig_torus_trajectory(REPORT_DIR / "fig_trajectory.pdf")
     fig_scaling(REPORT_DIR / "fig_scaling.pdf")
-    fig_predictions(REPORT_DIR / "fig_predictions.pdf")
+
+    # Precompute baselines once for both prediction figures.
+    loaded = _load_predictions()
+    baselines = None
+    if loaded is not None:
+        _, actual, context = loaded
+        baselines = _load_rna_baselines(
+            context, actual.shape[0], max_chains=3000, filter_canonical=True
+        )
+    fig_predictions(REPORT_DIR / "fig_predictions.pdf", baselines=baselines)
+
+    # Compact versions for the NeurIPS manuscript.
+    fig_trajectory_compact(REPORT_DIR / "fig_trajectory_compact.pdf")
+    fig_predictions_bar_only(REPORT_DIR / "fig_predictions_bar.pdf", baselines=baselines)
+    fig_scaling_compact(REPORT_DIR / "fig_scaling_compact.pdf")
     print(f"wrote figures to {REPORT_DIR}")
     return 0
 

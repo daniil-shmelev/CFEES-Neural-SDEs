@@ -1,0 +1,817 @@
+
+\documentclass{article} % For LaTeX2e
+\usepackage{iclr2026_conference,times}
+
+% ---- arXiv toggle (leave commented for ICLR submission) ----
+% \def\isarxiv{1}  % <-- UNCOMMENT this line *only* for the arXiv build
+\makeatletter
+\@ifundefined{isarxiv}{}{\iclrfinalcopy} % final mode => names shown, no line-number ruler
+\makeatother
+% ------------------------------------------------------------
+
+
+% Optional math commands from https://github.com/goodfeli/dlbook_notation.
+\input{math_commands.tex}
+
+\usepackage{hyperref}
+\usepackage{url}
+
+\usepackage[utf8]{inputenc} % allow utf-8 input
+\usepackage[T1]{fontenc}    % use 8-bit T1 fonts
+\usepackage{hyperref}       % hyperlinks
+\usepackage{url}            % simple URL typesetting
+\usepackage{booktabs}       % professional-quality tables
+\usepackage{amsfonts}       % blackboard math symbols
+\usepackage{nicefrac}       % compact symbols for 1/2, etc.
+\usepackage{microtype}      % microtypography
+\usepackage{xcolor}         % colors
+
+% \usepackage[nocompress]{cite}
+\usepackage{lipsum}
+\usepackage{amsfonts}
+\usepackage{graphicx}
+\usepackage{epstopdf}
+%\usepackage{algorithmic}
+\ifpdf
+  \DeclareGraphicsExtensions{.eps,.pdf,.png,.jpg}
+\else
+  \DeclareGraphicsExtensions{.eps}
+\fi
+
+\usepackage{subcaption}
+\usepackage{dirtytalk}
+\usepackage{multirow}
+\usepackage{array}
+\newcolumntype{?}{!{\vrule width 1pt}}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage[dvipsnames]{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{decorations.pathreplacing}
+\usetikzlibrary{arrows}
+\setlength{\parindent}{0pt}
+\usepackage{stmaryrd}
+\usepackage{mathrsfs}
+\usepackage{enumitem}
+\setenumerate{noitemsep,topsep=0pt,parsep=0pt,partopsep=0pt}
+\setlength{\textfloatsep}{5pt}
+\usepackage{wrapfig}
+\usepackage{csquotes}
+\DeclareFontEncoding{LS1}{}{}
+\DeclareFontSubstitution{LS1}{stix}{m}{n}
+\DeclareSymbolFont{stixletters}{LS1}{stix}{m}{it}
+\DeclareMathAccent{\backvec}{\mathord}{stixletters}{"91}
+\usepackage[font=small,skip=2mm]{caption}
+
+\usepackage{amsmath}
+\usepackage{amsthm}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}[section]
+\newtheorem{notation}{Notation}[section]
+\newtheorem{example}{Example}[section]
+
+\theoremstyle{remark}
+\newtheorem*{remark}{Remark}
+
+\newtheorem{proposition}{Proposition}[section]
+\newtheorem{theorem}{Theorem}[section]
+
+\input{trees}
+
+
+\title{Explicit and Effectively Symmetric Schemes for Neural SDEs}
+
+% Authors must not appear in the submitted version. They should be hidden
+% as long as the \iclrfinalcopy macro remains commented out below.
+% Non-anonymous submissions will be rejected without review.
+
+\author{%
+  Daniil Shmelev\\
+  Department of Mathematics\\
+  Imperial College London\\
+  \texttt{daniil.shmelev23@imperial.ac.uk} \\
+  \And
+  Cristopher Salvi\\
+  Department of Mathematics\\
+  Imperial College London\\
+  \texttt{c.salvi@imperial.ac.uk} \\
+}
+
+% The \author macro works with any number of authors. There are two commands
+% used to separate the names and addresses of multiple authors: \And and \AND.
+%
+% Using \And between authors leaves it to \LaTeX{} to determine where to break
+% the lines. Using \AND forces a linebreak at that point. So, if \LaTeX{}
+% puts 3 of 4 authors names on the first line, and the last on the second
+% line, try using \AND instead of \And before the third author name.
+
+\newcommand{\fix}{\marginpar{FIX}}
+\newcommand{\new}{\marginpar{NEW}}
+
+\newcommand{\CHANGE}[1]{\color{red}#1\color{black}}
+
+% \iclrfinalcopy % Uncomment for camera-ready version, but NOT for submission.
+
+\begin{document}
+
+\maketitle
+
+% ---- remove ICLR header/footer branding for arXiv build ----
+\makeatletter
+\@ifundefined{isarxiv}{}{%
+  \thispagestyle{plain}
+  \pagestyle{plain}
+  \fancyhead{}        % blank out fancyhdr
+  \fancyfoot{}
+  \renewcommand{\headrulewidth}{0pt}
+  \renewcommand{\footrulewidth}{0pt}
+}
+\makeatother
+% ------------------------------------------------------------
+
+
+\begin{abstract}
+  Backpropagation through (neural) SDE solvers is traditionally approached in two ways: discretise-then-optimise, which offers accurate gradients but incurs prohibitive memory costs due to storing the full computational graph (even when mitigated by checkpointing); and optimise-then-discretise, which achieves constant memory cost by solving an auxiliary backward SDE, but suffers from slower evaluation and gradient approximation errors. Algebraically reversible solvers promise both memory efficiency and gradient accuracy, yet existing methods such as the Reversible Heun scheme are often unstable under complex models and large step sizes. We address these limitations by introducing a novel class of stable, near-reversible Runge–Kutta schemes for neural SDEs. These \emph{Explicit and Effectively Symmetric (EES)} schemes retain the benefits of reversible solvers while overcoming their instability, enabling memory-efficient training without severe restrictions on step size or model complexity. Through numerical experiments, we demonstrate the superior stability and reliability of our schemes, establishing them as a practical foundation for scalable and accurate training of neural SDEs.
+\end{abstract}
+
+
+\section{Introduction}
+
+\emph{Neural stochastic differential equations (SDEs)} have recently emerged as a flexible tool for modelling stochastic dynamics, with training typically cast as a distribution-matching problem between generated and observed trajectories. Several approaches have been proposed in the literature, differing mainly in the choice of discriminating divergence. SDE-GANs~\citep{kidger2021neural} use the 1-Wasserstein distance, while Latent SDEs~\citep{li2020scalable} optimize with respect to the KL divergence via variational inference, and can be viewed as variational autoencoders. Another alternative proposed by~\cite{issa2023non} trains neural SDEs non-adversarially using maximum mean discrepancies (MMD) with \emph{signature kernels}~\citep{kiraly2019kernels, salvi2021signature, lemercier2024log}, a recently introduced family of kernels on path space which received significant attention due to their efficiency in handling path-dependent problems~\citep{salvi2021higher, lemercier2021distribution, pannier2024path, cirone2025rough}.
+
+While effective, the stochastic calculus underpinning SDEs can be technically cumbersome, especially when developing higher order solvers, deriving and analysing backpropagation algorithms, or extending to rougher noises than Brownian motion. A natural way to bypass these limitations is to view SDEs through the lens of \emph{rough paths}. Rough path theory \citep{lyons1998differential, gubinelli2004controlling, gubinelli2010ramification} provides a deterministic calculus on path space that extends classical It\^o integration beyond semimartingales, enabling one to treat SDEs as a special case of \emph{rough differential equations (RDEs)}
+\begin{equation}\label{eqn:rde}
+dy(t) \;=\; f_0(t, y_t)\,dt \;+\; f(t, y_t)\,d\mathbf{X}(t), 
+\qquad y_{t_0} = y_0 \in \mathbb{R}^m,
+\end{equation}
+where $\mathbf{X}$ is a \emph{rough path} above a driving signal $X = (X^1,...,X^d) : [0,T] \to \mathbb{R}^d$, $f = (f_1,...,f_d)$ and $f_i : \mathbb{R}^m \to \mathbb{R}^m$ are  vector fields for $i=0,...,d$ which determine the system dynamics. In fact, there is a large class of stochastic processes which can be “naturally lifted” to rough paths, including Gaussian processes such as fractional Brownian motion with Hurst parameter $H > 1/4$ and Volterra processes \citep{friz2010multidimensional}. Viewing SDEs through the lens of RDEs provides a significant conceptual simplification. In the RDE framework, the driving signal $\mathbf{X}$ is treated as a rough path, which abstracts away the stochastic integral and allows one to work with deterministic calculus on path space. Rough path theory has become a powerful mathematical framework for analyzing modern machine learning models. It has provided the foundation for proving theoretical properties of neural differential equations~\citep{morrill2021neural, arribas2020sigsdes, cirone2023neural, holberg2024exact}, sequence-to-sequence architectures~\citep{kidger2019deep}, and more recently for deep selective state-space models (SSMs)~\citep{cirone2024theoretical, cirone2025parallelflow, walker2025structured} and score-based diffusion models~\citep{barancikovasigdiffusions}. for a survey of recent applications of rough path theory to machine learning, we refer the reader  to~\citep{fermanian2023new}.
+
+From an algorithmic perspective, the RDE formulation also plays a central role in training neural SDEs (NSDEs), where one must perform backpropagation through an SDE solver. For example, the derivation of the \emph{adjoint method}---a key tool for backpropagation through differential equation solvers---becomes far more transparent when formulated in terms of RDEs, avoiding much of the technical machinery required in the stochastic setting; see for instance ~\citep{cass_salvi_notes}. More generally, the RDE viewpoint unifies backpropagation across ODEs, SDEs, and controlled differential equations (CDEs) \citep{kidger2020neural}, offering a clean pathwise calculus that is both mathematically rigorous and practically aligned with autodiff frameworks.  Several strategies have been proposed. A first approach, known as \emph{discretise-then-optimise}, directly backpropagates through the solver’s internal operations. This yields accurate gradients and is computationally efficient, but requires storing all intermediate states, making it memory-intensive. A second approach, \emph{optimise-then-discretise}, instead derives a backwards-in-time adjoint equation and solves it numerically using another call to the solver. This eliminates the need to store intermediate quantities, resulting in constant memory cost with respect to solver depth. However, it typically produces less accurate gradients and is slower due to the need to recompute forward trajectories during the backward pass.
+
+A third option leverages \emph{algebraically reversible solvers}, which enable the exact reconstruction of the solution trajectory of a differential equation from its terminal point, allowing for accurate and memory-efficient backpropagation. In the setting of an autonomous ODE
+\begin{equation} \label{eq:ode}
+    dy_t = f(y_t) dt,
+\end{equation}
+a one step method $y_{n+1} = y_n + \Phi_h(y_n)$ is said to be \emph{reversible} or \emph{symmetric} if a step of the method starting from $y_1$ with a negative step size exactly recovers the initial condition $y_0$, that is, $\Phi_{-h} = \Phi^{-1}_h$. Whilst reversible schemes offer an efficient approach to backpropagation through differential equations, such schemes are difficult to construct. It is well known that Runge--Kutta schemes are reversible only if they are implicit, making them unsuitable for applications to Neural ODEs. More generally, symmetric parasitism-free general linear methods cannot be explicit \citep{butcher2016symmetric}. To overcome this problem, existing reversible methods proposed in literature, such as the asynchronous leapfrog integrator (ALF) \citep{zhuang2021mali} and the Reversible Heun method \citep{kidger2021efficient}, track auxiliary states as part of the integration. Whilst this technique allows for explicit reversible schemes, it comes at the price of low stability. Both ALF and Reversible Heun are well-known to be unstable, and fail when integrating complex equations. For example,  ~\cite{zhang2021path} find that Reversible Heun is too unstable for their applications, stating:
+
+\begin{displayquote}
+\textit{"Regardless the accuracy and memory advantages of Reversible Heun claimed by torchsde, we found this integration approach is less stable compared with simple Euler integration without adjoint and results in numerical issues occasionally. We empirically found that methods without adjoint are more stable and lower loss compared with adjoint ones, even in low dimensional data" ~\citep{zhang2021path}}
+\end{displayquote}
+
+A potential solution to the difficulties of reversible solvers comes with the class of \emph{Explicit and Effectively Symmetric (EES)} Runge--Kutta schemes introduced in \cite{shmelev2025explicit}. Instead of considering exactly reversible schemes, the authors propose schemes which are almost reversible, up to an acceptable tolerance level. Such schemes offer stable, explicit integration methods which are virtually indistinguishable from truly symmetric schemes in practice. The authors demonstrate the efficacy of EES schemes on classical ODEs, and show that EES schemes are capable of producing similar results to classical schemes such as RK3 and RK4. In \cite{shmelev2025explicit}, the formulation of EES schemes is limited to ODEs, without an explicit generalisation to the case of SDEs or RDEs.
+
+Derivative-free \emph{Runge--Kutta (RK) methods} for RDEs were introduced by \cite{redmann2022runge}. Similarly to classical RK schemes for ODEs, the study of these methods is conducted through the formalism of B-series ~\citep{hairer2006geometric,mclachlan2015butcher,butcher2021b}. A B-series is an infinite series representation of a method, indexed by (labelled) non-planar rooted trees. A brief overview of B-series is given in Appendix \ref{appendix:trees}. A natural consequence of this analysis is that a general Runge--Kutta method for RDEs is given in terms of tree-iterated integrals of the underlying driving process. In practice, these tree-iterated integrals cannot be simulated directly as their distributions are often intractable. Following~\citep{deya2012milstein}, \cite{redmann2022runge} replaced these tree-iterated integrals with products of increments of the driving path. This substitution simplifies the derivation of Runge--Kutta coefficients and makes it feasible to establish order conditions up to any desired order.
+
+In this paper, we present a formulation of EES Runge--Kutta schemes for RDEs, and demonstrate their efficacy as integrators for Neural SDEs. The paper is structured as follows. Section \ref{sec:rev_solvers} gives an overview of existing reversible methods for neural differential equations. Section \ref{sec:ees} recounts the framework of Runge--Kutta methods for RDEs introduced in \cite{redmann2020runge}. Section \ref{sec:ees} begins by introducing EES schemes for ODEs. Using the framework of \cite{redmann2020runge}, we extend EES schemes to the case of RDEs, and derive results regarding their orders of convergence. Through \emph{mean-square stability} analysis, we show that EES schemes possess a similar stability domain to classical RK3 and RK4 schemes when applied to SDEs, and are significantly more stable than existing reversible schemes designed for Neural SDEs. We end Section \ref{sec:ees} by outlining a backpropagation algorithm for explicit RDE Runge--Kutta solvers such as EES schemes. In Section \ref{sec:experiments} we demonstrate the efficacy of EES schemes as integrators for Neural SDEs with two experiments concerned with the learning of extreme stochastic dynamics where existing reversible solvers fail due to instability, and show that EES successfully overcomes this issue. Section \ref{sec:conclusion} closes this work with a summary of the results, limitations and potential avenues for future work.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Existing reversible SDE solvers}\label{sec:rev_solvers}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+The major drawback of classical reversible schemes is their low efficiency. It is well known that Runge--Kutta schemes are reversible only if they are implicit. More generally, symmetric parasitism-free general linear methods cannot be explicit ~\citep{butcher2016symmetric}. A limited number of efficient reversible solvers have been proposed in the literature. The asynchronous leapfrog integrator (ALF) ~\citep{zhuang2021mali} for Neural ODEs overcomes the barrier of implicit schemes by tracking an additional state $v$ as part of the integration. Applied to the ODE \eqref{eq:ode}, the update rule of the ALF scheme can be written as
+\begin{align*}
+    y_{n+2} &= y_n + h f\left(t_n + \frac{h}{2}, y_n + \frac{h}{2} v_n\right),\\
+    v_{n+2} &=2f\left(t_n + \frac{h}{2}, y_n + \frac{h}{2} v_n\right) - v_n.
+\end{align*}
+A similar approach is taken for SDEs of the form
+\begin{equation}\label{eq:sde}
+    dy_t = g(t,y_t)dt + f(t,y_t)dW_t
+\end{equation}
+by the Reversible Heun method ~\citep{kidger2021efficient}, where the integration step reads
+\begin{align*}
+    y_{n+1} &= y_n + \frac{1}{2}(g(t_n, v_n) + g(t_{n+1}, v_{n+1})) \Delta t + \frac{1}{2}(f(t_n, v_n) + f(t_{n+1}, v_{n+1})) \Delta W_n,\\
+    v_{n+1} &= 2y_n - v_n + g(t_n, v_n) \Delta t + f(t_n, v_n) \Delta W_n.
+\end{align*}
+The Reversible Heun method is efficient, requiring only one evaluation of the drift $g$ and the diffusion $f$ per step. However, the method is inherently unstable.
+
+\begin{theorem}{\cite[Theorem D.19]{kidger2021efficient}}\label{thm:rev_heun_stability}
+    Suppose that the Reversible Heun method is used to obtain a solution $\{y_n, v_n\}_{n \geq 0}$ to the linear test ODE $dy = \lambda y\, dt$, where $\lambda \in \mathbb{C}$ and $y_0 \neq 0$. Then $\{y_n, v_n\}_{n \geq 0}$ is bounded if and only if $\lambda h \in [-i, i]$.
+\end{theorem}
+
+As remarked in ~\cite{kidger2021efficient}, this domain is also the absolute stability region for the reversible asynchronous leapfrog integrator ~\citep{zhuang2021mali}. This instability has proven to be a significant bottleneck in certain practical applications. In ~\cite{mccallum2024efficient}, a method was proposed for transforming any ODE integration method $y_{n+1} = y_n + \Psi_h(t,y_n)$ into one which is reversible, by taking the update
+\begin{align*}
+    y_{n+1} &= \lambda y_n + (1-\lambda) v_n + \Psi_h(t,v_n),\\
+    v_{n+1} &= v_n - \Psi_{-h}(t_{n+1}, y_{n+1}),
+\end{align*}
+
+for a given coupling parameter $\lambda \in (0,1]$. The method offers a way of constructing reversible schemes with larger stability domains than those of the ALF and Reversible Heun integrators \cite[Theorem 2.3]{mccallum2024efficient}. However, the resulting stability domain of the transformed method is typically much smaller than that of the underlying method $\Psi$, and depends additionally on the coupling parameter $\lambda$.
+
+
+% \subsection{Runge--Kutta methods for RDEs}\label{sec:rde_rk}
+
+
+\section{Explicit and Effectively Symmetric (EES) schemes for RDEs}\label{sec:ees}
+
+
+We will adopt the general framework of RDEs for our analysis of reversible SDE solvers, following the work of \citet{redmann2020runge}. As discussed in the introduction, a generalised Runge--Kutta scheme for RDEs can be formulated in terms of tree-iterated integrals of the underlying driving rough path. For a brief introduction to these generalised methods, we refer the reader to Appendix \ref{appendix:general_rk}. Computation of such tree-iterated integrals is usually not tractable in practice, and so we adopt the simplified scheme given instead in terms of products of increments of the driving rough path.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Simplified Runge--Kutta methods for RDEs}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Throughout, we will consider rough differential equations (RDEs) of the form
+\begin{equation}\label{eq:rde}
+    dy_t = f(y_t) d \mathbf{X}_t,
+\end{equation}
+where $\mathbf{X}$ is an $\alpha$-H\"older branched rough path for some $\alpha \in (0,1]$ and $f$ is sufficiently smooth and bounded with bounded derivatives. For an introduction to branched rough paths, we refer the reader to Appendix \ref{appendix:branched_rp}. Following \citet{redmann2022runge}, we assume that there exist smooth paths $\{X^h\}_{h > 0}$ whose natural lifts to branched rough paths $\{\mathbf{X}^h\}_{h > 0}$ converge (almost surely) to $\mathbf{X}$ under the metric for $\alpha$-H\"older rough paths $\varrho_\alpha$ (see Appendix \ref{appendix:branched_rp}) as $h \to 0$. That is, $\mathbf{X}$ is a geometric rough path. Assume that this Wong-Zakai-type approximation converges at a rate $r_0 > 0$ with respect to the inhomogemeous rough path metric for geometric rough paths $\varrho_\alpha^g$, such that $\varrho_\alpha^g(\mathbf{X}^h, \mathbf{X}) = \mathcal{O}(h^{r_0})$. For examples of such convergence rates for Gaussian processes, see ~\cite{friz2014convergence}. Let $y^h$ denote the solution associated with the driver $\mathbf{X}^h$,
+\begin{equation}\label{eq:approx_rde}
+    dy^h_t = f(y^h_t) d\mathbf{X}^h_t.
+\end{equation}
+
+A simplified Runge-Kutta scheme for $y^h$ is defined by
+\begin{align}\label{eq:simple_rk}
+    y^h_{n+1} &= y^h_n + \sum_{m=1}^d\sum_{i=1}^s b_i f_m(k_i) X^{(m)}_{t_n, t_{n+1}},\\
+    k_i &= y^h_n + \sum_{m=1}^d\sum_{j=1}^s a_{ij} f_m(k_j) X^{(m)}_{t_n, t_{n+1}},\nonumber
+\end{align}
+where $X_{t_n, t_{n+1}}$ denotes the increment of $X^h$ over $[t_n, t_{n+1}]$. For simplicity, we will assume equidistant grid points $t_{n+1} - t_n = h$ for all $n \geq 0$. The convergence rates derived in \citet{redmann2020runge} for schemes of the form in \eqref{eq:simple_rk} are given in Appendix \ref{appendix:convergence_simplified}.
+
+\begin{notation}
+    To avoid confusion, we will generally use $\Phi$ to refer to a classical ODE Runge--Kutta method, and $\Upsilon$ to refer to an RDE method of the form given in \eqref{eq:simple_rk}. Given an ODE Runge-Kutta scheme $\Phi$, we will write $\mathcal{R}(\Phi)$ to denote the RDE scheme of the form in \eqref{eq:simple_rk} with the same coefficients $\{a_{ij}\}_{1 \leq i,j\leq s}$ and $\{b_i\}_{1 \leq i \leq s}$ as the ODE scheme.\par\medskip
+\end{notation}
+
+% \begin{theorem}[{\cite[Theorem 3.3]{redmann2020runge}}]\label{thm:simple_local}
+%     Let $\Phi$ be an ODE Runge--Kutta scheme. The Runge-Kutta method $\mathcal{R}(\Phi)$ approximating $y^h$ has a local error of order $(p+1)\alpha$, i.e.
+%     \begin{equation*}
+%         y^h(t_0 + h) - y_1^h = \mathcal{O}(h^{(p+1)\alpha}),
+%     \end{equation*}
+%     if and only if the ODE Runge--Kutta method $\Phi$ is of order $p$.
+% \end{theorem}
+
+% \begin{theorem}[{\cite[Theorem 4.2]{redmann2020runge}}]\label{thm:simple_global}
+%     Let $\Phi$ be an ODE Runge--Kutta method of order $p$. Suppose that $f$ is $\text{Lip}^\gamma_b$ for some $\gamma > 1/\alpha$. Then $\mathcal{R}(\Phi)$ has a global error rate of $\eta = \min\{r_0, (p+1)\alpha - 1\}$, where $r_0$ is the convergence rate of the Wong-Zakai approximation. That is,
+%     \begin{equation*}
+%         \max_{n = 0, \ldots N} |y(t_n) - y^h_n| = \mathcal{O}(h^\eta).
+%     \end{equation*}
+% \end{theorem}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{EES schemes for ODEs}\label{sec:ees_rdes_subsec}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+EES schemes ~\citep{shmelev2025explicit} are a class of Runge--Kutta methods which offer an efficient approach to reversible integration without compromising on stability. Given positive integers $m \geq n$, an explicit Runge--Kutta scheme $\Phi_h$ is said to be an $\mathrm{EES}(n,m)$ scheme if $\Phi_h$ is of order $n$ and applying the scheme $\Phi_{-h} \circ \Phi_h$ to an ODE recovers the initial condition up to order $m$. When $m$ is large, such schemes offer near-reversible behaviour, which is often sufficient for practical applications. Butcher tableaux for 3-stage $\mathrm{EES}(2,5)$ and 4-stage $\mathrm{EES}(2,7)$ schemes are derived in ~\cite{shmelev2025explicit}. In ~\cite{shmelev2025explicit}, the authors focus mostly on $\mathrm{EES}(2,7)$ schemes, as these significantly outperform $\mathrm{EES}(2,5)$ schemes as integrators for ODEs. For our applications to Neural SDEs, we will instead restrict ourselves to $\mathrm{EES}(2,5)$, as we do not expect the extra accuracy of $\mathrm{EES}(2,7)$ justifies the extra stage required in this case. Proposition \ref{prop:EES_2_5} gives the general form of the Butcher tableau of a scheme belonging to $\mathrm{EES}(2,5)$ in terms of a parameter $x$, which we will denote by $\mathrm{EES}(2,5;x)$.
+
+\begin{proposition}[{\cite[Proposition 8.4]{shmelev2025explicit}}]
+\label{prop:EES_2_5}
+    3-stage Runge--Kutta schemes belonging to $\mathrm{EES}(2,5)$ have a Butcher tableau of the form:
+    \begin{equation}
+    {\renewcommand{\arraystretch}{2.2}
+    \begin{array}{c|ccc}
+    0 &&&\\
+    \displaystyle\frac{1+2x}{4(1-x)} & \displaystyle\frac{1+2x}{4(1-x)} &&\\[7pt]
+    \displaystyle\frac{3}{4(1-x)} & \displaystyle\frac{(4x-1)^2}{4(x-1)(1-4x^2)} & \displaystyle\frac{1-x}{(1-4x^2)} &\\[7pt]
+    \hline
+    & x & \displaystyle\frac{1}{2} & \displaystyle\frac{1}{2} - x
+    \end{array}
+    }
+    \end{equation}
+    for some $x \in \mathbb{R}$, $x \neq 1, \pm \frac{1}{2}$.
+\end{proposition}
+
+\begin{wrapfigure}{r}{5cm}
+\vspace{-0.8cm}
+    \includegraphics[width = 0.4\textwidth]{figures/stability_regions_1.pdf}
+    \captionsetup{oneside,margin={0.5cm,0cm}}
+    \caption{\textit{Stability domain for $\mathrm{EES}(2,5;1/10)$ compared to  Kutta's RK3 and RK4.}}
+    \label{fig:ees25_stability}
+    \vspace{-0.5cm}
+\end{wrapfigure}
+
+Recall from Theorem \ref{thm:rev_heun_stability} that the stability domain of Reversible Heun is the interval $[-i, i]$, which is also the stability domain of the ALF integrator. The stability region for $\mathrm{EES}(2,5)$ schemes is significantly larger and is comparable to classical methods such as Kutta's RK4, as shown in Figure \ref{fig:ees25_stability}. Theorem \ref{thm:ees25_ode_stability} gives the exact form of this region for $\mathrm{EES}(2,5;x)$.
+
+\begin{theorem}\label{thm:ees25_ode_stability}
+    Suppose that, for some $x \neq 1, \pm \frac{1}{2}$, $\mathrm{EES}(2,5;x)$ is used to obtain a solution $\{y_n\}_{n \geq 0}$ to the linear test equation $dy = \lambda y\, dt$, where $\lambda \in \mathbb{C}$ and $y_0 \neq 0$. Then $y_n \to 0$ as $n \to \infty$ if and only if
+    \begin{equation*}
+        \left\lvert 1 + \rho + \frac{1}{2} \rho^2 + \frac{1}{8} \rho^3 \right\rvert < 1,
+    \end{equation*}
+    where $\rho = \lambda h$.
+\end{theorem}
+
+The result follows from the fact that Runge--Kutta methods applied to linear test equations admit a linear update rule, $y_{n+1} = R(\rho) y_n$, where $R(\rho)$ is the stability function associated with the scheme. As such, the proof of Theorem \ref{thm:ees25_ode_stability} is simply a direct computation of the stability function $R(\rho) = 1 + \rho + \frac{1}{2} \rho^2 + \frac{1}{8}\rho^3$ for $\mathrm{EES}(2,5;x)$, which we omit here. We note that the stability region of $\mathrm{EES}(2,5;x)$ is completely independent of the choice of the parameter $x$. Motivated by the discussion in \citet[Section 8.1]{shmelev2025explicit}, we choose to fix the parameter $x = 1/10$ and refer to $\mathrm{EES}(2,5;1/10)$ as \textit{the} $\mathrm{EES}(2,5)$ scheme from now on.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{EES schemes for RDEs}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+We aim to define an analogue of EES schemes for RDEs and give convergence rates for the local and global errors of these schemes. To reason about the reversibility of schemes, it will be convenient to adopt the following notation.
+
+\begin{notation}
+    Let $\{y^h_n\}_{i=0, \ldots, N}$ denote the solution of a Runge--Kutta scheme $y^h_{n+1} = y^h_n + \Upsilon(y^h_n, X_{t_n, t_{n+1}})$ of the form given in \eqref{eq:simple_rk} applied to \eqref{eq:approx_rde}. Let $\backvec{\Upsilon}$ denote the reverse-time scheme, $\backvec{\Upsilon}(\cdot, X_{t_n, t_{n+1}}) := \Upsilon(\cdot, -X_{t_n, t_{n+1}})$, and let $\backvec{y}^h_n$ denote the result of an n-fold application of $\backvec{\Upsilon}$ to $y^h_n$, such that $\{\backvec{y}^h_n\}_{i=0, \ldots, N}$ is a sequence of approximations to the initial condition $y_0$.
+\end{notation}
+
+We may now define a class of $\mathrm{EES}$ schemes for RDEs, which we will denote by $\mathrm{EES}_\mathcal{R}$. In a similar fashion to \citet{shmelev2025explicit}, we will define the schemes in terms of both the local error of the solution and the local error of the recovered initial condition when the scheme is run in reverse.
+
+\begin{definition}
+    When applied to \eqref{eq:approx_rde}, a Runge--Kutta scheme $y^h_{n+1} = y^h_n + \Upsilon(y^h_n, \mathbf{X}_{t_n, t_{n+1}})$ of the form \eqref{eq:simple_rk} is said to belong to $\mathrm{EES}_\mathcal{R}(n,m)$ for $m \geq n$ if
+    \begin{equation*}
+        y^h(t_1) - y^h_1 = \mathcal{O}(h^{(n+1)\alpha}),\quad y_0 - \backvec{y}^h_1 = \mathcal{O}(h^{(m+1)\alpha}).
+    \end{equation*}
+\end{definition}
+
+As a consequence of \citet[Theorem 3.3]{redmann2020runge}, $\mathrm{EES}_\mathcal{R}$ schemes can be constructed directly from $\mathrm{EES}$ schemes by using the same coefficients. A global error rate for the schemes is given below as a corollary of \cite[Theorem 4.2]{redmann2020runge}, noting that the error in the recovery of $y_0$ from $\backvec{y}_n^h$ is independent of the chosen Wong-Zakai approximation, and as such independent of $r_0$. Numerical experiments verifying the global rates on a test RDE driven by a fractional Brownian motion are presented in Appendix \ref{appendix:convergence}.\par\medskip
+
+\begin{theorem}\label{thm:ees_local}
+    Let $\Phi \in \mathrm{EES}(n,m)$ for some $m \geq n$. Then $\mathcal{R}(\Phi) \in \mathrm{EES}_\mathcal{R}(n,m)$.
+\end{theorem}
+\begin{proof}
+    Since $\Phi$ is of order $n$, it follows from \cite[Theorem 3.3]{redmann2020runge} that $\mathcal{R}(\Phi)$ has a local error of order $(n+1)\alpha$. Consider the scheme $\mathcal{R}(\backvec{\Phi}) \circ \mathcal{R}(\Phi) = \mathcal{R}(\backvec{\Phi} \circ \Phi)$. By definition of $\Phi$, the scheme $\backvec{\Phi} \circ \Phi$ admits a B-series expansion $y_0 + \mathcal{O}(h^{m+1})$ ~\citep{shmelev2025explicit}. It follows from ~\citet{redmann2020runge} that the corresponding B-series expansion for $\mathcal{R}(\backvec{\Phi} \circ \Phi)$ is $y_0 + \mathcal{O}(h^{(m+1)\alpha})$.
+\end{proof}
+
+\begin{theorem}\label{thm:ees_global}
+    Let $\Upsilon \in \mathrm{EES}_\mathcal{R}(n,m)$ for some $m \geq n$. Then
+    \begin{equation*}
+        \max_{i = 0, \ldots, N}|y(t_i) - y_i| = \mathcal{O}(h^{\eta_1}), \quad \max_{i = 0, \ldots, N}\left|y_0 - \backvec{y}_i\right| = \mathcal{O}(h^{\eta_2}),
+    \end{equation*}
+    where $\eta = \min\{r_0, (n+1)\alpha - 1\}$ and $\eta_2 = (m+1)\alpha - 1$.
+\end{theorem}
+
+\begin{proof}
+    Since $\Phi$ is of order $n$, it follows from \cite[Theorem 4.2]{redmann2020runge} that $\mathcal{R}(\Phi)$ has a global error of order $\eta_1 = \min\{r_0, (n+1)\alpha - 1\}$. The global rate for the recovery of the initial condition $y_0$ from $\backvec{y}_i$ follows immediately from \citet[Proposition 4.1]{redmann2020runge}.
+\end{proof}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Stability of EES schemes for SDEs}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+As discussed in the introduction and subsequently in Section \ref{sec:ees}, $\mathrm{EES}$ schemes offer a stable alternative to reversible integration. Whilst the stability of $\mathrm{EES}$ in the case of ODEs has been studied in \citet{shmelev2025explicit} and Section \ref{sec:ees}, we are interested in the stability of $\mathrm{EES}_\mathcal{R}$ when applied to stochastic drivers for our applications to Neural SDEs. To evaluate the stability in the context of SDEs, we consider the \textit{mean-square stability}, which has been widely used for the analysis of stochastic integration methods in the literature ~\citep{higham2000mean, drummond1991computer, hernandez1993convergence, komori1995stahle, komori1994some, petersen1998general, saito1993t, saito1996stability, schurz1996asymptotical}. Given the test equations
+\begin{equation}\label{eq:sde_test_eq}
+    dy_t = \lambda y_t dt + \mu y_t dW_t,
+\end{equation}
+where $\lambda, \mu \in \mathbb{C}$ and $y_0 \neq 0$ almost surely, a solution $\{y_n\}_{n \geq 0}$ derived from a numerical integrator is said to be \textit{mean-square stable} if $\lim_{n \to \infty} \mathbb{E}(|y_n|^2) = 0$. It follows in a similar fashion to Theorem \ref{thm:ees25_ode_stability} that $\mathrm{EES}(2,5;x)$ applied to \ref{eq:sde_test_eq} is mean-square stable if and only if
+\begin{equation*}
+    \mathbb{E} \left[ \left\lvert 1 + \rho + \frac{1}{2} \rho^2 + \frac{1}{8} \rho^3 \right\rvert^2 \right] < 1,
+\end{equation*}
+where $\rho = \lambda dt + \mu dW_t \sim N(\lambda dt, \mu^2 dt)$. Figure \ref{fig:ees_stoch_stability} shows 4 cross-sections of the stability domain. For comparison, we take the RDE analogues of RK3 and RK4 of the form in \eqref{eq:simple_rk}, $\mathcal{R}(\text{RK3})$ and $\mathcal{R}(\text{RK4})$. Along most cross-sections, $\mathrm{EES}_\mathcal{R}(2,5)$ achieves a similar or greater stability to $\mathcal{R}(\text{RK3})$ and $\mathcal{R}(\text{RK4})$.
+
+\begin{figure}[H]
+\centering
+    \includegraphics[width = \textwidth,trim={0.95cm .3cm 0cm .4cm},clip]{figures/stoch_stability.pdf}
+    \caption{\textit{Cross sections of the mean-square stability domains of $\mathrm{EES}_\mathcal{R}(2,5)$, $\mathcal{R}(\text{RK3})$ and $\mathcal{R}(\text{RK4})$.}}
+    \label{fig:ees_stoch_stability}
+\end{figure}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Backpropagation through explicit Runge--Kutta methods}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+The algorithm for backpropagation through an explicit Runge--Kutta scheme $\Upsilon$ of the form in \eqref{eq:simple_rk} is given in Algorithm \ref{alg:rk_backprop}. We assume the solver is applied to a (neural) RDE of the form
+\begin{equation}
+    dy^h_t = f(y^h_t; \theta) d\mathbf{X}^h_t,
+\end{equation}
+where $\theta$ are learnable parameters requiring backpropagation, trained with respect to a loss $L(\{y^h_n\}_{n=0}^N)$. As with all reversible schemes, a reverse step ${\backvec{\Upsilon}}$ is used to recover $y_n$ from $y_{n+1}$, followed by a backpropagation through the internal operations of the solver $\Upsilon$. The latter step is achieved by defining $z_i = f(k_i; \theta)$ and computing the derivatives $\partial L / \partial z_i$ and $\partial L / \partial k_i$ in reverse through the stages $i = s, s-1, \ldots, 1$. At each stage, a backpropagation algorithm is called to backpropagate the derivative $\partial L / \partial z_i$ through $f$, resulting in the derivative $\partial L / \partial k_i$ and a local derivative with respect to $\theta$, $d_\theta$.
+
+\begin{algorithm}
+\caption{Backpropagation through Explicit Runge--Kutta Schemes}\label{alg:rk_backprop}
+\textbf{Input:} $y_{n+1}$, $\partial_{y_{n+1}} L$\\
+\textbf{Input:} Running derivative with respect to $\theta$, $\partial_\theta L$\\
+\textbf{Input:} Explicit RK method $\Upsilon$ of the form in \eqref{eq:simple_rk} with coefficients $\{a_{ij}\}_{1 \leq i,j \leq s}$ and $\{b_i\}_{1 \leq i \leq s}$.
+\begin{algorithmic}
+
+\State $y_n = \backvec{\Upsilon}(y_{n+1}, dX)$
+
+\For {$i = s, \ldots 1$}
+    \State $\partial_{z_i} L = b_i dX \cdot \partial_{y_{n+1}}L + \sum_{j=i+1}^s a_{ji} dX \cdot \partial_{k_j}L$
+    \State $d_\theta, \partial_{k_i} L = \text{backprop}_f( \partial_{z_i}L)$
+    \State $\partial_\theta L \mathrel{+}= d_\theta$
+\EndFor
+
+\State $\partial_{y_n} L = \partial_{y_{n+1}} L + \sum_{i=1}^s \partial_{k_i} L$\\
+\Return $y_n, \partial_{y_n} L, \partial_\theta L$
+
+\end{algorithmic}
+\end{algorithm}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Experiments}\label{sec:experiments}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+We evaluate the performance of $\mathrm{EES}_\mathcal{R}(2,5)$ on examples of Neural SDEs with challenging dynamics. We note that there are limited solvers which can be used as baselines in our experiments, with Reversible Heun being the only widely adopted explicit reversible SDE solver at the time of writing. In order to expand our baselines, we take the approach of McCallum-Foster for constructing reversible ODE solvers and apply it to the RDE versions of the Euler and Explicit Midpoint schemes, defined by the form in \eqref{eq:simple_rk}. Algorithm \ref{alg:rk_backprop} can then be used in conjunction with the backpropagation algorithm found in \cite{mccallum2024efficient} to backpropagate efficiently through the resulting schemes.\par\smallskip
+
+We present the results of training Neural SDEs on OU and GBM dynamics. In both cases, we pick the step sizes of the solvers to fix the total number of function evaluations of the drift and diffusion, leading to comparable runtimes for all of the solvers.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{High volatility Ornstein–Uhlenbeck process}\label{chapter:OU}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Consider learning the Ornstein–Uhlenbeck (OU) dynamics
+\begin{equation*}
+    dy_t = \nu(\mu - y_t) dt + \sigma dW_t, \quad y_0 \in \mathbb{R},
+\end{equation*}
+under a high-volatility regime $\sigma \gg 0$. Specifically, we take $\nu=0.2, \mu=0.1$ and $\sigma=2$. Motivated by ~\citet{oh2024stable}, we take a Neural Langevin SDE (LSDE) defined by
+\begin{equation*}
+    dz_t = g(z_t; \theta_g) dt + f(t; \theta_f) \circ dW_t, \quad z_0 = h(\mathbf{x}, \theta_h) \in \mathbb{R}^{d_z},
+\end{equation*}
+
+\begin{wrapfigure}{R}{0cm}
+% \vspace{-0.3cm}    
+    \includegraphics[width = 0.4\textwidth,trim={4mm 4mm 4mm 0mm},clip]{figures/OU_mse.pdf}
+    \captionsetup{oneside,margin={0.5cm,0cm}}
+    \caption{\textit{Training MSE for OU dynamics with a fixed number of evaluations of $f,g$.}}
+    \label{fig:lsde}
+\vspace{-.6cm}
+\end{wrapfigure}
+
+where $h$ is a learnable affine function of the input data $\mathbf{x} = \{x_n\}_{n\geq 0}$, $x_n \in \mathbb{R}^2$, sampled from the true OU dynamics, and $g,f$ are neural networks parametrised by $\theta_g,\theta_f$ respectively. We choose the dimension of the latent representation $d_z = 32$, and parametrise $f,g$ as 2-layer neural networks of width 32 with LipSwish activations. The SDEs are integrated over $t \in [0,10]$ and the LSDE is trained for 250 epochs using the Adam optimiser with a fixed learning rate of $10^{-3}$. At each epoch, 50,000 realisations of the trained dynamics are sampled and the MSE loss is computed against the true OU dynamics.\par\smallskip
+
+Figure \ref{fig:lsde} shows the training loss using Reversible Heun, McCallum-Foster (MCF) methods and $\mathrm{EES}_\mathcal{R}(2,5)$, with the step size chosen such that the number of evaluations of $f,g$ is fixed between solvers. Such a choice results in comparable runtimes for all of the solvers, allowing for a fair comparison. Table \ref{table:lsde} gives the number of evaluations of $f,g$ per step of the solvers, the chosen step size, the terminal MSE and the total runtime of each solver. From Figure \ref{fig:lsde}, we see that for the initial $\sim 50$ epochs, the methods perform similarly. After this, $\mathrm{EES}_\mathcal{R}(2,5)$ significantly outperforms the other methods, suggesting the model has begun to learn high-volatility dynamics which cause instability in the Reversible Heun and McCallum-Foster methods.\par\smallskip
+
+% \vspace{5mm}
+\begin{table}[H]
+\centering
+    {\renewcommand{\arraystretch}{1.1}
+  \begin{tabular}{c|cccccc}
+    Method & \#Eval. / Step & Step Size & Terminal MSE & Runtime (s) \\
+    \cline{1-5}
+    Reversible Heun & 1 & 1/12 & 1.0190 & 368.2\\
+    MCF Euler & 2 & 1/6 & 1.3048 & 307.5\\
+    MCF Midpoint & 4 & 1/3 & 1.1651 & 279.5\\
+    $\mathrm{EES}_\mathcal{R}(2,5)$ & 3 & 1/4 &0.0582 & 261.3\\
+  \end{tabular}}
+  \caption{Metrics for OU dynamics. The step size is chosen such that the total number of evaluations of $f,g$ per integration is fixed.}
+  \label{table:lsde}
+\end{table}
+
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% \subsection{Calibration of a geometric Brownian motion to option prices}
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Consider learning the dynamics of a 1-dimensional geometric Brownian motion (GBM)
+% \begin{equation*}
+%     dS_t = r S_t dt + \sigma S_t dW_t.
+% \end{equation*}
+% To simulate a simplified problem of calibration to the risk-neutral dynamics of an asset, suppose that for some fixed unknown parameters $r$ and $\sigma$, we are given a set of undiscounted call prices
+% \begin{equation*}
+%     C(K, t) = \mathbb{E}[(S_t - K)^+]
+% \end{equation*}
+% for $K \in \mathcal{K}$, $t \in \mathcal{T}$, and wish to learn the underlying dynamics using a Neural SDE
+% \begin{wrapfigure}{r}{5cm}
+% \vspace{-0.1cm}
+%     \includegraphics[width = 0.4\textwidth]{figures/GBM_mse.pdf}
+%     \captionsetup{oneside,margin={0.5cm,0cm}}
+%     \caption{\textit{Training loss for GBM  with $r = 0.5$ and $\sigma = 1.5$.}}
+%     \label{fig:gbm}
+% \end{wrapfigure}
+% \begin{equation*}
+%     dS^\theta_t = g(t, S^\theta_t; \theta_g) dt + f(t, S^\theta_t; \theta_f) \circ dW_t,
+% \end{equation*}
+
+% where $g,f$ are neural networks parametrised by $\theta_g,\theta_f$ respectively. For simplicity, we use Stratonovich integration and rely on the Neural SDE to learn the required It\^o correction term. As in the previous example, we increase the difficulty of the integration by considering extreme dynamics with parameters $r = 0.5$ and $\sigma = 1.5$. We choose to parametrise $f,g$ as 3-layer neural networks of width 8 with LipSwish activations. The SDEs are integrated over $t \in [0,25]$ with a step size of 0.25, and the Neural SDE is trained for 250 epochs using the Adam optimiser with an exponentially decaying learning rate initialised at $10^{-2}$ and decayed at a rate of $0.99$. At each epoch, $N=250,000$ realisations of the trained dynamics are sampled and used to compute the (discounted) MSE loss of the call prices,
+% \begin{align*}
+%     L &:= \frac{1}{|\mathcal{K}|\cdot|\mathcal{T}|} \sum_{k,t \in \mathcal{K} \times \mathcal{T}} e^{-2rt} (C(K,t) - \widehat{C}(K,t))^2\\
+%     \widehat{C}(K,t) &= \frac{1}{N}\sum_{i=1}^N (S^\theta_{i,t} - K)^+
+% \end{align*}
+% where $S^\theta_{i,t}$ is the value of the $i^{th}$ sample at time $t$ and we set $\mathcal{K} = \{k \in \mathbb{N} : 90 \leq k \leq 110\}$ and $\mathcal{T} = \{2.5, 5, 7.5, \ldots, 25\}$. Figure \ref{fig:gbm} shows the training loss of the model when Reversible Heun and $\mathrm{EES}_\mathcal{R}(2,5)$ are used as the solver. As with the previous experiment, the methods perform similarly at the start of the training before they encounter extreme dynamics. After this, $\mathrm{EES}_\mathcal{R}(2,5)$ outperforms the Reversible Heun method.
+
+\subsection{High-dimensional GBM with stiff drift}
+
+Consider learning the dynamics of a high-dimensional geometric Brownian motion (GBM)
+\begin{equation*}
+    dy_t = A y_t dt + \sigma y_t dW_t, \quad y_0 \in \mathbb{R}^d,
+\end{equation*}
+where $A \in \mathbb{R}^{d \times d}$ and $\sigma \in \mathbb{R}$. We introduce a stiff drift component by choosing $A = QDQ^T$, where $D = \text{diag}(\lambda_0, \lambda_1, \ldots, \lambda_{d-1})$, $\lambda_i = -20(1 + \frac{i}{d})$, and $Q$ is a randomly generated orthogonal matrix, and take $d = 25$ and $\sigma = 0.1$. We choose to learn the dynamics using a Neural SDE of the form
+\begin{equation*}
+    dz_t = g(z_t; \theta_g) dt + f(z_t; \theta_f) \circ dW_t, \quad z_0 = h(\mathbf{x}, \theta_h) \in \mathbb{R}^{d_z},
+\end{equation*}
+where $f,g$ are neural networks with the same architecture as Section \ref{chapter:OU}. We integrate the SDEs over $t \in [0,1]$ for 1,000 epochs, sampling 10,000 realisations of the dynamics at every epoch. The Adam optimiser is used with a fixed learning rate of $2\times 10^{-1}$.\par\smallskip
+
+As in the previous example, Figure \ref{fig:gbm} and Table \ref{table:gbm} show the results of training using various reversible methods, with the step size chosen such that the number of evaluations of $f,g$ is fixed. We see that the instability caused by the stiff drift results in diverging MSE for all solvers except $\mathrm{EES}_\mathcal{R}(2,5)$, which manages to retain moderate stability for the entire 1,000 epochs of training. Figure \ref{fig:gbm_grad} shows the MSE of the gradient of the loss during training, where the true gradient is computed by autodifferentiation through a discretise-then-optimise solution, using the same solver and step size. Despite its near-reversibility, $\mathrm{EES}_\mathcal{R}(2,5)$ achieves a lower gradient MSE compared to other solvers. This effect is likely the result of the superior stability of $\mathrm{EES}_\mathcal{R}(2,5)$, in combination with the linear nature of the target SDE.
+
+\begin{figure}[H]
+\centering
+\begin{minipage}{0.45\textwidth}
+  \includegraphics[width = \textwidth,trim={0mm 4mm 0mm 0mm},clip]{figures/GBM_mse_2.pdf}
+    \captionsetup{oneside,margin={0.5cm,0cm}}
+    \caption{\textit{Training MSE for GBM dynamics with a fixed number of evaluations of $f,g$.}}
+    \label{fig:gbm}
+\end{minipage}%
+\begin{minipage}{0.45\textwidth}
+  \includegraphics[width = \textwidth,trim={0mm 4mm 0mm 0mm},clip]{figures/GBM_mse_2_grads.pdf}
+    \captionsetup{oneside,margin={0.5cm,0cm}}
+    \caption{\textit{Gradient MSE for GBM dynamics with a fixed number of evaluations of $f,g$.}}
+    \label{fig:gbm_grad}
+\end{minipage}
+\end{figure}
+
+\begin{table}[H]
+\centering
+    {\renewcommand{\arraystretch}{1.1}
+  \begin{tabular}{c|ccccc}
+    Method & \#Eval. / Step & Step Size & Terminal MSE & Runtime (s) \\
+    \cline{1-5}
+    Reversible Heun & 1 & 1/60 & - & 1283.6\\
+    MCF Euler & 2 & 1/30 & - & 1119.9\\
+    MCF Midpoint & 4 & 1/15 & - & 1270.1\\
+    $\mathrm{EES}_\mathcal{R}(2,5)$ & 3 & 1/20 &1.1803E-4 & 1050.0\\
+  \end{tabular}}
+  \caption{Metrics for stiff GBM dynamics. The step size is chosen such that the total number of evaluations of $f,g$ per integration is fixed.}
+  \label{table:gbm}
+\end{table}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Conclusions, limitations and future work}\label{sec:conclusion}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+In this paper, we have introduced the use of Explicit and Effectively Symmetric (EES) schemes as stable integrators for Neural SDEs, and more generally, RDEs. Using the framework of \cite{redmann2020runge}, we have adapted existing EES schemes introduced by~\cite{shmelev2025explicit} for ODEs to the more general setting of RDEs. Through \emph{mean-square stability} analysis, we have shown that EES schemes possess similar stability domains to classical RK3 and RK4 schemes when applied to SDEs. We discussed an efficient algorithm for backpropagation through explicit Runge--Kutta schemes for RDEs, and presented two experiments involving the training of Neural ODEs on extreme SDE dynamics. In both experiments, our $\mathrm{EES}_\mathcal{R}(2,5)$ scheme demonstrated superior stability to the Reversible Heun scheme, resulting in faster training and a lower terminal loss.
+
+EES schemes provide a stable alternative to existing methods such as Reversible Heun, resulting in fast and accurate training when applied to complex dynamics. However, when stability is not an issue, Reversible Heun offers faster integration by requiring only one evaluation of the drift and diffusion per step, as opposed to 3 evaluations required by $\mathrm{EES}_\mathcal{R}$. Addressing this limitation, either through algorithmic changes or the derivation of new EES-type schemes which employ auxiliary variables, is left for future work.
+
+There are several potential extensions to this paper which are left for future research. Applications of EES schemes to more complicated models, including but not limited to Neural Jump SDEs \citep{jia2019neural, herrera2020neural}, Neural CDEs \citep{kidger2020neural} and Neural RDEs \citep{morrill2021neural}, may be of interest. An extension of EES schemes to include partitioned or adaptive step-size schemes would prove valuable for the training of stiff neural differential equations.
+
+
+% \TODO{Reproducability statement}
+
+
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%
+% \newpage
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+% \begin{figure*}[b!]
+%     \centering
+%     \begin{subfigure}[t]{0.85\textwidth}
+%         \centering
+%         \includegraphics[width = \textwidth]{figures/rde_example_EES25.pdf}
+%     \end{subfigure}%
+%     \caption{EES25 forward, convergence rate \textit{2H - 1/2}}
+% \end{figure*}
+
+% \begin{figure*}[b!]
+%     \centering
+%     \begin{subfigure}[t]{0.85\textwidth}
+%         \centering
+%         \includegraphics[width = \textwidth]{figures/rde_example_EES25_sym.pdf}
+%     \end{subfigure}%
+%     \caption{EES25 backward, convergence rate \textit{6H - 1}}
+% \end{figure*}
+
+% \begin{figure*}[b!]
+%     \centering
+%     \begin{subfigure}[t]{0.85\textwidth}
+%         \centering
+%         \includegraphics[width = \textwidth]{figures/rde_example_EES27.pdf}
+%     \end{subfigure}%
+%     \caption{EES27 forward, convergence rate \textit{2H - 1/2}}
+% \end{figure*}
+
+% \begin{figure*}[b!]
+%     \centering
+%     \begin{subfigure}[t]{0.85\textwidth}
+%         \centering
+%         \includegraphics[width = \textwidth]{figures/rde_example_EES27_sym.pdf}
+%     \end{subfigure}%
+%     \caption{EES25 backward, convergence rate \textit{8H - 1}}
+% \end{figure*}
+
+
+\bibliography{iclr2026_conference}
+\bibliographystyle{iclr2026_conference}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\appendix
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Rooted Trees and B-Series}\label{appendix:trees}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{The Connes-Kreimer Hopf Algebra}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+We give a brief account of non-planar (labelled) rooted trees and the Connes-Kreimer Hopf algebra. We refer the reader to \cite{hoffman2003hopf} for a comprehensive presentation. A non-planar labelled rooted tree is defined as a graph $\tau = (V, E, r)$ with vertex set $V$, edge set $E$ and a root vertex $r \in V$, together with a set of vertex decorations drawn from $\{1, \ldots, d\}$. We denote the empty tree by $\emptyset$. Given trees $\tau_1, \ldots, \tau_m$, we write $[\tau_1, \ldots, \tau_m]_a$ to denote the tree formed by connecting the root vertices of $\tau_1, \ldots, \tau_m$ to a new root, which receives the label $a \in \{1, \ldots, d\}$. Non-planarity means that the order of the trees in $[\tau_1, \ldots, \tau_m]_a$ is irrelevant. Repeated trees will be denoted using power notation, for instance
+\begin{equation*}
+    [\tau_1,\tau_1, \tau_2, \tau_3, \tau_3, \tau_3]_a = [\tau_1^2, \tau_2, \tau_3^3]_a.
+\end{equation*}
+
+We write $|\tau|$ to denote the number of vertices in a tree. Additionally, we define the following combinatorial quantities, defined on unlabelled trees:
+\begin{align*}
+    \emptyset! &= 1, \quad \bullet! = 1, \quad [\tau_1, \ldots, \tau_m]! = |[\tau_1, \ldots, \tau_m]| \prod_{i=1}^m \tau_i!,\\
+    \sigma(\emptyset) &= 1, \quad \sigma(\bullet) = 1, \quad \sigma([\tau_1^{k_1}, \ldots, \tau_m^{k_m}]) = \prod_{i=1}^m k_i! \sigma(\tau_i)^{k_i},\\
+    \beta(\emptyset) &= 1, \quad \beta(\bullet) = 1, \quad \beta([\tau_1^{k_1}, \ldots, \tau_m^{k_m}]) = \binom{[\tau_1^{k_1}, \ldots, \tau_m^{k_m}]}{|\tau_1|, \ldots, |\tau_m|}\prod_{i=1}^m \frac{1}{k_i!} \beta(\tau_i)^{k_i}.
+\end{align*}
+
+We will refer to the commutative juxtaposition of trees as a forest. We write $\mathcal{T}$ to denote the set of all non-planar labelled rooted trees, and $\mathcal{T}_N \subset \mathcal{T}$ to denote the trees $\tau$ with $|\tau| \leq N$. The free commutative $\mathbb{R}$-algebra generated by $\mathcal{T}$ will be denoted $\mathcal{H}$. The Connes-Kreimer ~\citep{connes1999hopf} Hopf algebra on $\mathcal{H}$ is defined as follows. Multiplication $\mu : \mathcal{H} \otimes \mathcal{H} \to \mathcal{H}$ is defined as the commutative juxtaposition of two forests, extended linearly to $\mathcal{H}$. The multiplicative unit is defined to be the empty forest $\emptyset$. The counit map $\varepsilon: \mathcal{H} \to \mathbb{R}$ is defined by $\varepsilon(\emptyset) = 1$ and $\varepsilon(\tau) = 0$ for all non-empty trees $\tau \in \mathcal{H}$. The coproduct map is defined recursively by
+\begin{align*}
+    \Delta(\emptyset) &= \emptyset \otimes \emptyset,\\
+    \Delta [\tau_1, \ldots, \tau_m]_a &= [\tau_1, \ldots, \tau_m]_a \otimes \emptyset + (\mathrm{id} \otimes B^a_+)(\Delta \tau_1 \cdots \Delta \tau_m),
+\end{align*}
+where $B^a_+(\tau_1 \cdots \tau_m) := [\tau_1 \cdots \tau_m]_a$ for a forest $\tau_1 \cdots \tau_m$. The definition is extended to a linear multiplicative map on $\mathcal{H}$. We will occasionally use Sweedler's notation
+\begin{equation*}
+    \Delta \tau = \sum_{(\tau)} \tau^{(1)} \otimes \tau^{(2)}
+\end{equation*}
+for the coproduct. We omit the definition of the antipode $S$ here, and instead refer the reader to ~\citep{manchon2004hopf, hoffman2003hopf}. We denote the dual of the Connes-Kreimer Hopf algebra by $\mathcal{H}^*$. For $\varphi_1, \varphi_2 \in \mathcal{H}^*$, the convolution product is defined by
+\begin{equation*}
+    \varphi_1 * \varphi_2 = \mu_\mathbb{R} \circ (\varphi_1 \otimes \varphi_2) \circ \Delta,
+\end{equation*}
+with $\mu_\mathbb{R} : \mathbb{R} \otimes \mathbb{R} \to \mathbb{R}$ denoting multiplication in $\mathbb{R}$.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{B-Series Expansions of ODEs}\label{appendix:b_series_ode}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+For any tree $\tau \in \mathcal{T}$, the so-called elementary differential $F(\tau)(y)$ ~\citep{butcher2016numerical} is defined recursively by
+\begin{align*}
+    &F(\emptyset)(y) = y, \quad F(\bullet_i)(y) = f_i(y),\\
+    &F([\tau_1, \tau_2, \ldots, \tau_m]_i)(y) = f^{(m)}_i(y)(F(\tau_1)(y), F(\tau_2)(y), \ldots, F(\tau_m)(y)).
+\end{align*}
+
+Given a map $\varphi: \mathcal{T} \to \mathbb{R}$, the associated B-series is defined
+\begin{equation*}
+    B_h(\varphi, y_0) := \sum_{\tau \in \mathcal{T}} \frac{h^{|\tau|}}{\sigma(\tau)} \varphi(\tau) F(\tau)(y_0).
+\end{equation*}
+
+A key property of B-series is their closure under composition. One can show that for two B-series \cite{hairer1974butcher, butcher2024b},
+\begin{equation*}
+    B_h(\varphi_2, B_h(\varphi_1, y_0)) = B_h(\varphi_1 * \varphi_2, y_0),
+\end{equation*}
+where $\varphi_1 * \varphi_2$ is the convolution product defined above. It can be shown that the exact solution to the ODE in \eqref{eq:ode} admits a B-series representation $y(h) = B_h(e, y_0)$, where $e(\tau) = 1 / \tau!$. Similarly, the solution given by a Runge--Kutta scheme with coefficients $\{a_{ij}\}_{1 \leq i,j \leq s}$, $\{b_i\}_{1 \leq i \leq s}$ admits the B-series representation $B_h(\varphi, y_0)$, where \cite[Lemma 312B]{butcher2016numerical}
+\begin{equation*}
+    \varphi(\tau) := \sum_{i_1, \ldots, i_n} b_{i_1} \prod_{(k,\ell) \in E} a_{i_k, i_\ell}
+\end{equation*}
+for a tree $\tau = (V,E,r)$ with $|\tau| = n$.\\
+
+We refer the reader to ~\citep{hairer2006geometric,mclachlan2015butcher,butcher2021b} for a detailed account of B-series and the Butcher group.
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Branched Rough Paths}\label{appendix:branched_rp}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Let $\mathcal{H}$ be the Connes-Kreimer Hopf algebra of non-planar labelled rooted trees defined above.
+
+\begin{definition}
+    Let $\alpha \in (0,1]$. An $\alpha$-H\"older branched rough path is a map $\mathbf{X} : [0,T]^2 \to \mathcal{H}^*$ such that
+    \begin{enumerate}
+        \item for all $s,t \in [0,T]$ and $\tau_1, \tau_2 \in \mathcal{H}$,
+        \begin{equation*}
+            \langle \mathbf{X}_{s,t}, \tau_1 \rangle \langle \mathbf{X}_{s,t}, \tau_2 \rangle = \langle \mathbf{X}_{s,t}, \tau_1 \tau_2 \rangle,
+        \end{equation*}
+        \item for all $\tau \in \mathcal{H}$,
+        \begin{equation*}
+            \langle \mathbf{X}_{s,t}, \tau \rangle = \sum_{(\tau)} \langle \mathbf{X}_{s,u}, \tau^{(1)} \rangle \langle \mathbf{X}_{u, t}, \tau^{(2)} \rangle,
+        \end{equation*}
+        where $\Delta \tau = \sum_{(\tau)} \tau^{(1)} \otimes \tau^{(2)}$.
+        \item for all $\tau \in \mathcal{H}$,
+        \begin{equation*}
+            \sup_{s \neq t} \frac{|\langle \mathbf{X}_{s,t}, \tau \rangle |}{|t - s| ^{\alpha |\tau|}} < \infty.
+        \end{equation*}
+    \end{enumerate}
+\end{definition}
+
+\begin{remark}
+    As remarked in ~\citep{hairer2015geometric,gubinelli2010ramification}, the components $\langle \mathbf{X}_{s,t}, \tau \rangle$ with $|\tau| > N$ are determined by those with $|\tau| \leq N$, where $N$ is the largest integer such that $N \alpha \leq 1$.
+\end{remark}
+
+The space of $\alpha$-H\"older branched rough paths is a complete metric space under the metric
+
+\begin{equation*}
+    \varrho_\alpha(\mathbf{X}, \mathbf{Y}) := \sum_{\tau \in \mathcal{T}_N} \sup_{s \neq t} \frac{|\langle \mathbf{X}_{s,t} - \mathbf{Y}_{s,t}, \tau \rangle |}{|t - s|^{\alpha |\tau|}},
+\end{equation*}
+
+where $N = \lfloor 1 / \alpha \rfloor$.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{B-Series Expansions of RDEs}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+We recount the results of ~\citep{redmann2020runge} regarding series expansions of the solutions to RDEs of the form \eqref{eq:rde}. Recall the definition of the elementary differential $F(\tau)(y)$ from Appendix \ref{appendix:b_series_ode}.
+
+\begin{theorem}[{\cite[Theorem 2.10]{redmann2020runge}}]
+    Let $\mathbf{X}$ be an $\alpha$-branched rough path and $h > 0$. Then \eqref{eq:rde} admits the series expansion
+    \begin{equation*}
+        y(t_0 + h) = y_0 + \sum_{\tau \in \mathcal{T}_p} \frac{1}{\sigma(\tau)} F(\tau)(y_0) \left<\mathbf{X}_{t_0, t_0 + h}, \tau\right> + \mathcal{O}(h^{(p+1) \alpha})
+    \end{equation*}
+    for all $p \geq \lfloor 1 / \alpha \rfloor$.
+\end{theorem}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{General Runge--Kutta methods for RDEs} \label{appendix:general_rk}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Following ~\cite{burrage1996high, burrage1998general, burrage2000order, redmann2020runge}, consider the class of general Runge-Kutta methods defined by
+\begin{align}\label{eq:full_rk}
+    y_{n+1} &= y_n + \sum_{m=1}^d \sum_{i=1}^s z_i^{(m)} f_m(k_i),\\
+    k_i &= y_n + \sum_{m=1}^d \sum_{j=1}^s Z^{(m)}_{ij} f_m(k_j),\nonumber
+\end{align}
+where $Z^{(1)}, \ldots, Z^{(d)} \in \mathbb{R}^{s \times s}$ and $z^{(1)}, \ldots, z^{(d)} \in \mathbb{R}^s$. We briefly recount the local and global error rates for such schemes, as formulated in ~\cite{redmann2020runge}. The results are based on the adaptation of B-series to RDEs presented above.
+
+\begin{definition}
+    Given $h > 0$, define the maps $a, \varphi$ recursively over non-planar labelled rooted trees $\tau$ by setting $\varphi(\emptyset)(h) := (1,\ldots,1)^T \in \mathbb{R}^s$, where $\emptyset$ denotes the empty tree, and for a tree $\tau = [\tau_1 \cdots \tau_n]_i$ formed by joining $\tau_1, \ldots, \tau_n$ by a new root labelled $i$,
+    \begin{align*}
+        \varphi(\tau)(h) &:= \prod_{j=1}^n (Z^{(i)} \varphi(\tau_j)(h)),\\
+        a(\tau)(h) &:= \left< z^{(i)}, \prod_{j=1}^n \varphi(\tau_j)(h)\right>.
+    \end{align*}
+\end{definition}
+
+\begin{theorem}[{~\citep{redmann2020runge}}]
+    The general Runge-Kutta method given by \eqref{eq:full_rk} has a local error of order $(p+1)\alpha$ if and only if
+    \begin{equation*}
+        \left< \mathbf{X}_{t_0, t_0 + h}, \tau \right> = a(\tau)(h)
+    \end{equation*}
+    for all non-planar labelled rooted trees $\tau$ with $p$ or fewer nodes, i.e. $|\tau| \leq p$.
+\end{theorem}
+
+\begin{proposition}[{\cite[Proposition 4.1]{redmann2020runge}}]
+    Let $y(t, y_0)$ denote the solution to \eqref{eq:rde} at time $t$ starting at $y_0$. Suppose the Runge--Kutta method \eqref{eq:full_rk} has a local error of order $(p+1)\alpha$, and there exists a constant $C_1 > 0$ such that
+    \begin{equation*}
+        |y(h, y_0) - y(h, \widetilde{y}_0)| \leq C_1 |y_0 - \widetilde{y}_0|,
+    \end{equation*}
+    for $h$ sufficiently small. Then there exists $C > 0$ such that
+    \begin{equation*}
+        \max_{n = 0, \ldots, N} |y(t_n) - y_n| \leq Ch^{(p+1)\alpha - 1}.
+    \end{equation*}
+\end{proposition}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Convergence of simplified Runge--Kutta methods}\label{appendix:convergence_simplified}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\begin{theorem}[{\cite[Theorem 3.3]{redmann2020runge}}]
+    Let $\Phi$ be an ODE Runge--Kutta scheme. The Runge-Kutta method $\mathcal{R}(\Phi)$ approximating $y^h$ has a local error of order $(p+1)\alpha$, i.e.
+    \begin{equation*}
+        y^h(t_0 + h) - y_1^h = \mathcal{O}(h^{(p+1)\alpha}),
+    \end{equation*}
+    if and only if the ODE Runge--Kutta method $\Phi$ is of order $p$.
+\end{theorem}
+
+\begin{theorem}[{\cite[Theorem 4.2]{redmann2020runge}}]
+    Let $\Phi$ be an ODE Runge--Kutta method of order $p$. Suppose that $f$ is $\text{Lip}^\gamma_b$ for some $\gamma > 1/\alpha$. Then $\mathcal{R}(\Phi)$ has a global error rate of $\eta = \min\{r_0, (p+1)\alpha - 1\}$, where $r_0$ is the convergence rate of the Wong-Zakai approximation. That is,
+    \begin{equation*}
+        \max_{n = 0, \ldots N} |y(t_n) - y^h_n| = \mathcal{O}(h^\eta).
+    \end{equation*}
+\end{theorem}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Convergence of \texorpdfstring{$\mathrm{EES}_\mathcal{R}$ schemes}{TEXT}}\label{appendix:convergence}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% An immediate consequence of the definition is that the map $\mathcal{R}(\cdot)$ is multiplicative.
+
+% \begin{proposition}\label{prop:r_mult}
+%     Let $\Phi_1, \Phi_2$ be ODE Runge--Kutta methods. Then $\mathcal{R}(\Phi_1 \circ \Phi_2) = \mathcal{R}(\Phi_1) \circ \mathcal{R}(\Phi_2)$.
+% \end{proposition}
+
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% \subsection{Proof of Theorem \ref{thm:ees_local}}\label{appendix:ees_local_proof}
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% \TODO{1. Again, the first proof below relies on \cite[Theorem 3.3]{redmann2020runge} holding true for all $p$.}
+
+% \TODO{2. These proofs are quite short, and largely follow from existing results. Do we move them to the main text or keep them here?}
+
+% \begin{proof}
+%     Since $\Phi$ is of order $n$, it follows from Theorem \ref{thm:simple_local} that $\mathcal{R}(\Phi)$ has a local error of order $(n+1)\alpha$. Consider the scheme $\mathcal{R}(\backvec{\Phi}) \circ \mathcal{R}(\Phi) = \mathcal{R}(\backvec{\Phi} \circ \Phi)$. By definition of $\Phi$, the scheme $\backvec{\Phi} \circ \Phi$ admits a B-series expansion $y_0 + \mathcal{O}(h^{m+1})$ ~\citep{shmelev2025explicit}. It follows from ~\citep{redmann2020runge} that the corresponding B-series expansion for $\mathcal{R}(\backvec{\Phi} \circ \Phi)$ is $y_0 + \mathcal{O}(h^{(m+1)\alpha})$.
+% \end{proof}
+
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% \subsection{Proof of Theorem \ref{thm:ees_global}}\label{appendix:ees_global_proof}
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% \begin{proof}
+%     Since $\Phi$ is of order $n$, it follows from Theorem \ref{thm:simple_global} that $\mathcal{R}(\Phi)$ has a global error of order $\eta_1 = \min\{r_0, (n+1)\alpha - 1\}$. The global error rate for the recovery of the initial condition $y_0$ from $\backvec{y}_i$ follows immediately from \cite[Proposition 4.1]{redmann2020runge}.
+% \end{proof}
+
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% \subsection{Experiments}\label{appendix:fbm_rates}
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+We verify the global error rates given in Theorem \ref{thm:ees_global} experimentally by reproducing the example given in ~\citep{redmann2020runge, deya2012milstein} for $\mathrm{EES}_\mathcal{R}(2,5; 1/10)$ and $\mathrm{EES}_\mathcal{R}(2,5; (5 - 3\sqrt{2}) / 14)$. We take the RDE
+\begin{equation*}
+    dy_t = \cos(y_t) d\mathbf{X}^{(1)}_t + \sin(y_t)d\mathbf{X}^{(2)}_t, \quad y_0 = 1
+\end{equation*}
+for $t \in [0,1]$, where $\mathbf{X}$ is the geometric lift pf a 2-dimensional fractional Brownian motion (fBm) with hurst index $H$. We compute the average of the maximal discretization error over $M = 10$ realisations of the RDE,
+\begin{equation*}
+    \mathcal{E}(h) := \frac{1}{M}\sum_{i=1}^M \max_{n=0,\ldots, N} |y_i(t_n) - y_{i,n}|,
+\end{equation*}
+where $y_i(t)$ denotes the solution to the $i^{th}$ realisation of the RDE and $y_{i,n}$ denotes the discretisation of the $i^{th}$ solution using an $\mathrm{EES}_\mathcal{R}$ scheme. Additionally, we evaluate the average error when recovering the initial condition,
+\begin{equation*}
+    \backvec{\mathcal{E}}(h) := \frac{1}{M}\sum_{i=1}^M |y_0 - \backvec{y}_{i,n}|.
+\end{equation*}
+From ~\citep{friz2014convergence}, the rate $r_0$ can be chosen arbitrarily close to $2H - 1/2$ for a fractional Brownian motion with Hurst parameter $H$. It follows that we expect $\eta_1 = 2H - 1/2$ in Theorem \ref{thm:ees_global} for both $\mathrm{EES}(2,5)$ and $\mathrm{EES}(2,7)$, and $\eta_2 = 6H-1$ for $\mathrm{EES}(2,5)$ and $\eta_2 = 8H-1$ for $\mathrm{EES}(2,7)$. These rates are shown in Figures \ref{fig:convergence_4}, \ref{fig:convergence_5} and \ref{fig:convergence_6} for $H = 0.4, 0.5$ and $0.6$ respectively.
+
+\begin{figure}[H]
+\centering
+    \includegraphics[width = 0.7\textwidth]{figures/rde_example_ees40.pdf}
+    \caption{\textit{Convergence rates for $H = 0.4$}}
+    \label{fig:convergence_4}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+    \includegraphics[width = 0.7\textwidth]{figures/rde_example_ees50.pdf}
+    \caption{\textit{Convergence rates for $H = 0.5$}}
+    \label{fig:convergence_5}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+    \includegraphics[width = 0.7\textwidth]{figures/rde_example_ees60.pdf}
+    \caption{\textit{Convergence rates for $H = 0.6$}}
+    \label{fig:convergence_6}
+\end{figure}
+
+
+\end{document}

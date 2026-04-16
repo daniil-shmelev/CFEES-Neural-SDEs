@@ -52,6 +52,9 @@ class RNATorsionDataset(DatasetProtocol):
     split: Literal["train", "val", "test"] = "train"
     context_length: int = 20
     residues_per_state: int = 1
+    future_bases_window: int = 0
+    filter_canonical: bool = False
+    canonical_threshold: float = 1.0
     train_fraction: float = 0.70
     val_fraction: float = 0.15
     cutoff_angstrom: float = 3.0
@@ -67,6 +70,8 @@ class RNATorsionDataset(DatasetProtocol):
             raise ValueError("context_length must be positive.")
         if self.residues_per_state <= 0:
             raise ValueError("residues_per_state must be positive.")
+        if self.future_bases_window < 0:
+            raise ValueError("future_bases_window must be non-negative.")
         self.ordering = "shuffle" if self.split == "train" else "sequential"
 
         chains = _load_or_build_chain_angles(
@@ -91,16 +96,35 @@ class RNATorsionDataset(DatasetProtocol):
         else:
             split_ids = test_ids
 
-        c_angles, c_bases, t_angles, t_bases = _build_pairs(
+        c_angles, c_bases, t_angles, t_bases, f_bases, f_mask = _build_pairs(
             {cid: chains[cid] for cid in split_ids},
             context_length=self.context_length,
             residues_per_state=self.residues_per_state,
+            future_bases_window=self.future_bases_window,
         )
+
+        if self.filter_canonical and len(t_angles) > 0:
+            circ_mean = np.arctan2(
+                np.mean(np.sin(t_angles), axis=0),
+                np.mean(np.cos(t_angles), axis=0),
+            )
+            diff = t_angles - circ_mean[None]
+            wrapped = np.arctan2(np.sin(diff), np.cos(diff))
+            dist = np.linalg.norm(wrapped, axis=1)
+            keep = dist >= self.canonical_threshold
+            c_angles = c_angles[keep]
+            c_bases = c_bases[keep]
+            t_angles = t_angles[keep]
+            t_bases = t_bases[keep]
+            f_bases = f_bases[keep]
+            f_mask = f_mask[keep]
 
         self._context_angles = to_host_jax_array(c_angles)
         self._context_bases = to_host_jax_array(c_bases)
         self._target_angles = to_host_jax_array(t_angles)
         self._target_bases = to_host_jax_array(t_bases)
+        self._future_bases = to_host_jax_array(f_bases)
+        self._future_mask = to_host_jax_array(f_mask)
         self._num_angles = int(NUM_ANGLES * self.residues_per_state)
         self._n_chains = len(split_ids)
 
@@ -113,6 +137,8 @@ class RNATorsionDataset(DatasetProtocol):
             "context_bases": self._context_bases[index],
             "target_angles": self._target_angles[index],
             "target_bases": self._target_bases[index],
+            "future_bases": self._future_bases[index],
+            "future_mask": self._future_mask[index],
         }
 
     def as_array_dict(self) -> dict[str, jax.Array]:
@@ -121,6 +147,8 @@ class RNATorsionDataset(DatasetProtocol):
             "context_bases": self._context_bases,
             "target_angles": self._target_angles,
             "target_bases": self._target_bases,
+            "future_bases": self._future_bases,
+            "future_mask": self._future_mask,
         }
 
     def metadata(self) -> dict[str, int]:
@@ -129,6 +157,7 @@ class RNATorsionDataset(DatasetProtocol):
             "num_bases": NUM_BASES,
             "context_length": self.context_length,
             "residues_per_state": self.residues_per_state,
+            "future_bases_window": self.future_bases_window,
             "dataset_size": len(self),
             "n_chains": self._n_chains,
         }
@@ -169,24 +198,30 @@ def _build_pairs(
     *,
     context_length: int,
     residues_per_state: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Build ``(context_angles, context_bases, target_angles, target_bases)``.
+    future_bases_window: int = 0,
+) -> tuple[
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray
+]:
+    """Build all six arrays needed for the RNA one-step forecasting task.
 
-    Each chain contributes a list of contiguous-residue runs, where each run
-    is a ``(angles, base_ids)`` pair. Within a run we group every
-    ``residues_per_state`` consecutive residues into one state of shape
-    ``(7 * residues_per_state,)``. We slide a window of length
-    ``context_length`` over the resulting state sequence and emit one pair
-    per window position whose target state is the immediately following
-    state. Base identities flow through the same reshape / slide so each
-    state has ``residues_per_state`` bases attached.
+    Returns ``(context_angles, context_bases, target_angles, target_bases,
+    future_bases, future_mask)``. The first four behave as before; the last
+    two expose the next ``future_bases_window`` states' base identities to
+    the model as free inference-time information (known from the chain
+    sequence). ``future_mask[i, j] == 1`` iff the ``j``-th future state of
+    pair ``i`` falls inside the same contiguous run; pad entries are zero.
+    When ``future_bases_window == 0`` the future arrays have a zero-sized
+    window axis and the mask is empty.
     """
     state_dim = NUM_ANGLES * residues_per_state
     bases_per_state = residues_per_state
+    f = future_bases_window
     c_angles_chunks: list[np.ndarray] = []
     c_bases_chunks: list[np.ndarray] = []
     t_angles_chunks: list[np.ndarray] = []
     t_bases_chunks: list[np.ndarray] = []
+    f_bases_chunks: list[np.ndarray] = []
+    f_mask_chunks: list[np.ndarray] = []
 
     for runs in chains.values():
         for run_angles, run_bases in runs:
@@ -207,19 +242,40 @@ def _build_pairs(
                 grouped_bases[context_length : context_length + num_pairs]
             )
 
+            if f > 0:
+                # Future window of pair i spans states [i+L+1 .. i+L+f].
+                future_idx = (
+                    np.arange(num_pairs)[:, None]
+                    + (context_length + 1)
+                    + np.arange(f)[None, :]
+                )
+                valid = future_idx < n_states
+                safe_idx = np.where(valid, future_idx, 0)
+                f_bases_chunks.append(grouped_bases[safe_idx])
+                f_mask_chunks.append(valid.astype(np.int8))
+
     if not c_angles_chunks:
         return (
             np.zeros((0, context_length, state_dim), dtype=np.float32),
             np.zeros((0, context_length, bases_per_state), dtype=np.int32),
             np.zeros((0, state_dim), dtype=np.float32),
             np.zeros((0, bases_per_state), dtype=np.int32),
+            np.zeros((0, f, bases_per_state), dtype=np.int32),
+            np.zeros((0, f), dtype=np.int8),
         )
 
     c_angles = np.concatenate(c_angles_chunks, axis=0).astype(np.float32)
     c_bases = np.concatenate(c_bases_chunks, axis=0).astype(np.int32)
     t_angles = np.concatenate(t_angles_chunks, axis=0).astype(np.float32)
     t_bases = np.concatenate(t_bases_chunks, axis=0).astype(np.int32)
-    return c_angles, c_bases, t_angles, t_bases
+    n = c_angles.shape[0]
+    if f > 0:
+        f_bases = np.concatenate(f_bases_chunks, axis=0).astype(np.int32)
+        f_mask = np.concatenate(f_mask_chunks, axis=0).astype(np.int8)
+    else:
+        f_bases = np.zeros((n, 0, bases_per_state), dtype=np.int32)
+        f_mask = np.zeros((n, 0), dtype=np.int8)
+    return c_angles, c_bases, t_angles, t_bases, f_bases, f_mask
 
 
 def _cache_key(*, cutoff_angstrom: float, max_chains: int | None) -> str:

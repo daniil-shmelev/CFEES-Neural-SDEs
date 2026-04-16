@@ -7,10 +7,15 @@ aligned with the current dataset cache.
 Usage::
 
     python scripts/train_and_save_predictions_demo.py
+
+Environment-variable overrides for quick hyperparameter sweeps:
+    RNA_LR, RNA_EPOCHS, RNA_WARMUP -- override learning_rate, epochs, warmup_steps.
 """
 
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 
 import equinox as eqx
@@ -35,32 +40,42 @@ OUT_PATH = PROJECT_ROOT / "results" / "rna_predictions_demo.npz"
 def main() -> int:
     config = make_config(
         experiment=Experiments.RNA,
-        epochs=20,
-        batch_size=64,
-        learning_rate=1e-4,
-        seed=0,
+        epochs=int(os.environ.get("RNA_EPOCHS", 20)),
+        batch_size=int(os.environ.get("RNA_BATCH_SIZE", 64)),
+        learning_rate=float(os.environ.get("RNA_LR", 3e-4)),
+        seed=int(os.environ.get("RNA_SEED", 0)),
         device=Devices.GPU,
-        hidden_dim=256,
-        ctx_dim=128,
-        n_steps=50,
-        dt=0.05,
+        hidden_dim=int(os.environ.get("RNA_HIDDEN_DIM", 256)),
+        ctx_dim=int(os.environ.get("RNA_CTX_DIM", 128)),
+        n_steps=int(os.environ.get("RNA_N_STEPS", 20)),
+        dt=float(os.environ.get("RNA_DT", 0.125)),
         solver=Solvers.CFEES25,
-        diffusion_scale=0.1,
-        context_length=20,
+        diffusion_scale=float(os.environ.get("RNA_DIFFUSION_SCALE", 0.1)),
+        context_length=int(os.environ.get("RNA_CONTEXT_LENGTH", 20)),
         residues_per_state=1,
-        max_chains=1000,
+        future_bases_window=int(os.environ.get("RNA_FUTURE_BASES_WINDOW", 0)),
+        future_ctx_dim=int(os.environ.get("RNA_FUTURE_CTX_DIM", 32)),
+        activation=os.environ.get("RNA_ACTIVATION", "silu"),
+        drift_depth=int(os.environ.get("RNA_DRIFT_DEPTH", 3)),
+        diffusion_depth=int(os.environ.get("RNA_DIFFUSION_DEPTH", 2)),
+        filter_canonical=os.environ.get("RNA_FILTER_CANONICAL", "0") == "1",
+        canonical_threshold=float(os.environ.get("RNA_CANONICAL_THRESHOLD", 1.0)),
+        max_chains=int(os.environ.get("RNA_MAX_CHAINS", 1000)),
     )
-    n_mc_samples = 16
-    warmup_steps = 1000
-    weight_decay = 1e-4
+    n_mc_samples = int(os.environ.get("RNA_N_MC_SAMPLES", 16))
+    warmup_steps = int(os.environ.get("RNA_WARMUP", 1000))
+    weight_decay = float(os.environ.get("RNA_WEIGHT_DECAY", 1e-4))
     use_energy_score = True
-    energy_score_samples = 4
+    energy_score_samples = int(os.environ.get("RNA_ENERGY_SAMPLES", 4))
 
     train_ds = RNATorsionDataset(
         split="train",
         max_chains=config.max_chains,
         context_length=config.context_length,
         residues_per_state=config.residues_per_state,
+        future_bases_window=config.future_bases_window,
+        filter_canonical=config.filter_canonical,
+        canonical_threshold=config.canonical_threshold,
     )
     metadata = train_ds.metadata()
 
@@ -72,17 +87,16 @@ def main() -> int:
         loss_fn = make_wrapped_mse_loss()
     metric_fn = make_wrapped_mae_metric()
     train_loader = make_loader(config, "train")
-    train_loader_next = jax.jit(train_loader.next)
     val_loader = make_loader(config, "val")
-    val_loader_next = jax.jit(val_loader.next)
 
     total_train_steps = train_loader.steps_per_epoch * config.epochs
+    end_lr_frac = float(os.environ.get("RNA_END_LR_FRAC", 0.05))
     schedule = optax.warmup_cosine_decay_schedule(
         init_value=0.0,
         peak_value=config.learning_rate,
         warmup_steps=min(warmup_steps, total_train_steps // 4),
         decay_steps=max(total_train_steps - warmup_steps, 1),
-        end_value=config.learning_rate * 0.05,
+        end_value=config.learning_rate * end_lr_frac,
     )
     optimizer = optax.chain(
         optax.clip_by_global_norm(1.0),
@@ -101,39 +115,76 @@ def main() -> int:
     )
 
     @eqx.filter_jit
-    def train_step(m, opt_state, batch, mask, step_key):
-        loss, grads = eqx.filter_value_and_grad(loss_fn)(m, batch, mask, step_key)
-        updates, new_opt_state = optimizer.update(grads, opt_state, m)
-        return eqx.apply_updates(m, updates), new_opt_state, loss
+    def run_train_epoch(model, opt_state, train_state, key):
+        model_arr, model_static = eqx.partition(model, eqx.is_array)
+        opt_arr, opt_static = eqx.partition(opt_state, eqx.is_array)
 
-    eval_metric = eqx.filter_jit(metric_fn)
+        def body(carry, batch, mask):
+            m_arr, o_arr, k, loss_sum = carry
+            m = eqx.combine(m_arr, model_static)
+            opt_s = eqx.combine(o_arr, opt_static)
+            k, step_key = jax.random.split(k)
+            loss, grads = eqx.filter_value_and_grad(loss_fn)(m, batch, mask, step_key)
+            updates, new_opt_s = optimizer.update(grads, opt_s, m)
+            new_m = eqx.apply_updates(m, updates)
+            new_m_arr, _ = eqx.partition(new_m, eqx.is_array)
+            new_o_arr, _ = eqx.partition(new_opt_s, eqx.is_array)
+            return (new_m_arr, new_o_arr, k, loss_sum + loss), None
+
+        init_carry = (model_arr, opt_arr, key, jnp.zeros(()))
+        train_state, final_carry, _ = train_loader.scan_epoch(
+            train_state, init_carry, body
+        )
+        new_m_arr, new_o_arr, new_key, total_loss = final_carry
+        new_model = eqx.combine(new_m_arr, model_static)
+        new_opt_state = eqx.combine(new_o_arr, opt_static)
+        return new_model, new_opt_state, train_state, new_key, total_loss
+
+    @eqx.filter_jit
+    def run_val_epoch(model, val_state, key):
+        model_arr, model_static = eqx.partition(model, eqx.is_array)
+
+        def body(carry, batch, mask):
+            m_arr, k, metric_sum = carry
+            m = eqx.combine(m_arr, model_static)
+            k, step_key = jax.random.split(k)
+            metric = metric_fn(m, batch, mask, step_key)
+            return (m_arr, k, metric_sum + metric), None
+
+        init_carry = (model_arr, key, jnp.zeros(()))
+        val_state, final_carry, _ = val_loader.scan_epoch(
+            val_state, init_carry, body
+        )
+        _, _, total_metric = final_carry
+        return val_state, total_metric
 
     best_ckpt_path = PROJECT_ROOT / "results" / "rna_best_model.eqx"
     best_ckpt_path.parent.mkdir(parents=True, exist_ok=True)
 
     best_model = model
     best_val = float("inf")
+    val_base_key = jax.random.key(config.seed + 1000)
+    initial_val_state = val_state
     for epoch in range(config.epochs):
-        total = 0.0
-        for _ in range(train_loader.steps_per_epoch):
-            key, step_key = jax.random.split(key)
-            batch, train_state, mask = train_loader_next(train_state)
-            model, opt_state, loss = train_step(model, opt_state, batch, mask, step_key)
-            total += float(loss)
-        val_metric = 0.0
-        for _ in range(val_loader.steps_per_epoch):
-            key, step_key = jax.random.split(key)
-            batch, val_state, mask = val_loader_next(val_state)
-            val_metric += float(eval_metric(model, batch, mask, step_key))
-        val_metric /= val_loader.steps_per_epoch
+        epoch_start = time.time()
+        model, opt_state, train_state, key, train_loss_sum = run_train_epoch(
+            model, opt_state, train_state, key
+        )
+        _, val_metric_sum = run_val_epoch(model, initial_val_state, val_base_key)
+        train_loss_sum.block_until_ready()
+        val_metric_sum.block_until_ready()
+        elapsed = time.time() - epoch_start
+        train_loss = float(train_loss_sum) / train_loader.steps_per_epoch
+        val_metric = float(val_metric_sum) / val_loader.steps_per_epoch
         if val_metric < best_val:
             best_val = val_metric
             best_model = model
             eqx.tree_serialise_leaves(best_ckpt_path, best_model)
         print(
             f"epoch {epoch + 1:2d}/{config.epochs}  "
-            f"train_loss={total / train_loader.steps_per_epoch:.4f}  "
-            f"val_mae={val_metric:.4f}  best_val={best_val:.4f}",
+            f"train_loss={train_loss:.4f}  "
+            f"val_mae={val_metric:.4f}  best_val={best_val:.4f}  "
+            f"wall={elapsed:.1f}s",
             flush=True,
         )
     model = best_model
@@ -143,12 +194,17 @@ def main() -> int:
         max_chains=config.max_chains,
         context_length=config.context_length,
         residues_per_state=config.residues_per_state,
+        future_bases_window=config.future_bases_window,
+        filter_canonical=config.filter_canonical,
+        canonical_threshold=config.canonical_threshold,
     )
     arrays = test_ds.as_array_dict()
     context_angles = jnp.asarray(arrays["context_angles"])
     context_bases = jnp.asarray(arrays["context_bases"])
     target_angles = jnp.asarray(arrays["target_angles"])
     target_bases = jnp.asarray(arrays["target_bases"])
+    future_bases = jnp.asarray(arrays["future_bases"])
+    future_mask = jnp.asarray(arrays["future_mask"])
 
     # Test-time averaging: draw n_mc_samples stochastic rollouts per context
     # and circular-mean them on the torus.
@@ -156,19 +212,21 @@ def main() -> int:
     per_sample_keys = jax.random.split(base_key, n_mc_samples)
 
     @jax.jit
-    def predict_ensemble(ctx_a, ctx_b, tgt_b, keys):
+    def predict_ensemble(ctx_a, ctx_b, tgt_b, fut_b, fut_m, keys):
         def one_sample(k):
             sub_keys = jax.random.split(k, ctx_a.shape[0])
             return jax.vmap(
-                lambda a, cb, tb, kk: model(a, cb, tb, kk)
-            )(ctx_a, ctx_b, tgt_b, sub_keys)
+                lambda a, cb, tb, fb, fm, kk: model(a, cb, tb, fb, fm, kk)
+            )(ctx_a, ctx_b, tgt_b, fut_b, fut_m, sub_keys)
         samples = jax.vmap(one_sample)(keys)  # (n_mc, n_test, d)
         mean_sin = jnp.mean(jnp.sin(samples), axis=0)
         mean_cos = jnp.mean(jnp.cos(samples), axis=0)
         return jnp.arctan2(mean_sin, mean_cos)
 
     predicted = jax.device_get(
-        predict_ensemble(context_angles, context_bases, target_bases, per_sample_keys)
+        predict_ensemble(
+            context_angles, context_bases, target_bases, future_bases, future_mask, per_sample_keys
+        )
     )
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -179,6 +237,8 @@ def main() -> int:
         context_angles=np.asarray(context_angles),
         context_bases=np.asarray(context_bases),
         target_bases=np.asarray(target_bases),
+        future_bases=np.asarray(future_bases),
+        future_mask=np.asarray(future_mask),
     )
     print(f"saved {OUT_PATH}", flush=True)
     print(f"n_test = {predicted.shape[0]}", flush=True)

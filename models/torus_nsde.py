@@ -20,9 +20,26 @@ from diffrax import (
 )
 from georax import CFEES25, GeometricTerm
 
+from datasets.rna.preprocessing import NUM_BASES
 from models.torus import Torus, wrap_to_pi
 
-NUM_BASES = 4  # A, C, G, U
+_ACTIVATIONS = {
+    "silu": jax.nn.silu,
+    "gelu": jax.nn.gelu,
+    "relu": jax.nn.relu,
+    "tanh": jnp.tanh,
+    "elu": jax.nn.elu,
+    "mish": jax.nn.mish,
+}
+
+
+def resolve_activation(name: str):
+    try:
+        return _ACTIVATIONS[name]
+    except KeyError as exc:
+        raise ValueError(
+            f"unknown activation {name!r}; must be one of {sorted(_ACTIVATIONS)}"
+        ) from exc
 
 
 def angle_features(theta: jax.Array) -> jax.Array:
@@ -40,14 +57,23 @@ class TorusDriftField(eqx.Module):
     mlp: eqx.nn.MLP
     geometry: Torus
 
-    def __init__(self, geometry, ctx_dim, hidden_dim, *, key):
+    def __init__(
+        self,
+        geometry,
+        ctx_dim,
+        hidden_dim,
+        *,
+        depth: int = 3,
+        activation=jax.nn.silu,
+        key,
+    ):
         d = geometry.dimension
         mlp = eqx.nn.MLP(
             in_size=2 * d + ctx_dim,
             out_size=d,
             width_size=hidden_dim,
-            depth=3,
-            activation=jax.nn.silu,
+            depth=depth,
+            activation=activation,
             key=key,
         )
         last = mlp.layers[-1]
@@ -67,14 +93,24 @@ class TorusDiffusionField(eqx.Module):
     geometry: Torus
     diffusion_scale: float
 
-    def __init__(self, geometry, ctx_dim, hidden_dim, diffusion_scale, *, key):
+    def __init__(
+        self,
+        geometry,
+        ctx_dim,
+        hidden_dim,
+        diffusion_scale,
+        *,
+        depth: int = 2,
+        activation=jax.nn.silu,
+        key,
+    ):
         d = geometry.dimension
         mlp = eqx.nn.MLP(
             in_size=2 * d + ctx_dim,
             out_size=d,
             width_size=hidden_dim,
-            depth=2,
-            activation=jax.nn.silu,
+            depth=depth,
+            activation=activation,
             key=key,
         )
         last = mlp.layers[-1]
@@ -115,10 +151,38 @@ class GRUEncoder(eqx.Module):
         return self.proj(h_final)
 
 
+class FutureBaseEncoder(eqx.Module):
+    """Small MLP over the flattened (one-hot future bases, mask) vector."""
+
+    mlp: eqx.nn.MLP
+
+    def __init__(
+        self, window: int, bases_per_state: int, out_dim: int, *, activation=jax.nn.silu, key
+    ):
+        in_dim = window * (bases_per_state * NUM_BASES + 1)
+        self.mlp = eqx.nn.MLP(
+            in_size=in_dim,
+            out_size=out_dim,
+            width_size=max(out_dim * 2, 32),
+            depth=2,
+            activation=activation,
+            key=key,
+        )
+
+    def __call__(self, future_bases: jax.Array, future_mask: jax.Array) -> jax.Array:
+        """future_bases: (F, bases_per_state) int; future_mask: (F,) int."""
+        encoded = encode_bases(future_bases)  # (F, bases_per_state * NUM_BASES)
+        mask = future_mask.astype(jnp.float32)[:, None]
+        gated = encoded * mask
+        inp = jnp.concatenate([gated.reshape(-1), mask.reshape(-1)])
+        return self.mlp(inp)
+
+
 class TorusNeuralSDE(eqx.Module):
     """Neural SDE on T^d for one-step torsion-angle forecasting."""
 
     encoder: GRUEncoder
+    future_encoder: FutureBaseEncoder | None
     drift_field: TorusDriftField
     diffusion_field: TorusDiffusionField
     name: str = eqx.field(static=True)
@@ -126,6 +190,8 @@ class TorusNeuralSDE(eqx.Module):
     d: int = eqx.field(static=True)
     bases_per_state: int = eqx.field(static=True)
     ctx_dim: int = eqx.field(static=True)
+    future_bases_window: int = eqx.field(static=True)
+    future_ctx_dim: int = eqx.field(static=True)
     n_steps: int = eqx.field(static=True)
     dt: float = eqx.field(static=True)
     solver: AbstractSolver = eqx.field(static=True)
@@ -142,20 +208,30 @@ class TorusNeuralSDE(eqx.Module):
         diffusion_scale: float = 0.3,
         adjoint: AbstractAdjoint | None = None,
         residues_per_state: int = 1,
+        future_bases_window: int = 0,
+        future_ctx_dim: int = 32,
+        activation: str = "silu",
+        drift_depth: int = 3,
+        diffusion_depth: int = 2,
         *,
         key,
     ):
-        k1, k2, k3 = jax.random.split(key, 3)
+        k1, k2, k3, k4 = jax.random.split(key, 4)
 
         geometry = Torus(num_angles)
         d = geometry.dimension
         bases_per_state = residues_per_state
         base_feature_dim = bases_per_state * NUM_BASES
+        act_fn = resolve_activation(activation)
 
         self.name = "torus_nsde"
         self.d = d
         self.bases_per_state = bases_per_state
         self.ctx_dim = ctx_dim
+        self.future_bases_window = future_bases_window
+        # Future encoder contributes extra dims only when enabled.
+        effective_future_ctx = future_ctx_dim if future_bases_window > 0 else 0
+        self.future_ctx_dim = effective_future_ctx
         self.n_steps = n_steps
         self.dt = dt
         self.solver = solver
@@ -166,16 +242,35 @@ class TorusNeuralSDE(eqx.Module):
         self.encoder = GRUEncoder(
             encoder_input_dim, hidden_dim, ctx_dim - base_feature_dim, key=k1
         )
+        if future_bases_window > 0:
+            self.future_encoder = FutureBaseEncoder(
+                window=future_bases_window,
+                bases_per_state=bases_per_state,
+                out_dim=future_ctx_dim,
+                activation=act_fn,
+                key=k4,
+            )
+        else:
+            self.future_encoder = None
         # Drift/diffusion see (sin/cos angle features, ctx) where ctx carries
-        # both the encoder output AND the target residue's base one-hot.
+        # the encoder output, the target residue's base one-hot, and
+        # (optionally) the future-base encoder's output.
+        total_ctx_dim = ctx_dim + effective_future_ctx
         self.drift_field = TorusDriftField(
-            geometry=geometry, ctx_dim=ctx_dim, hidden_dim=hidden_dim, key=k2
+            geometry=geometry,
+            ctx_dim=total_ctx_dim,
+            hidden_dim=hidden_dim,
+            depth=drift_depth,
+            activation=act_fn,
+            key=k2,
         )
         self.diffusion_field = TorusDiffusionField(
             geometry=geometry,
-            ctx_dim=ctx_dim,
+            ctx_dim=total_ctx_dim,
             hidden_dim=hidden_dim,
             diffusion_scale=diffusion_scale,
+            depth=diffusion_depth,
+            activation=act_fn,
             key=k3,
         )
 
@@ -184,6 +279,8 @@ class TorusNeuralSDE(eqx.Module):
         context_angles: jax.Array,
         context_bases: jax.Array,
         target_bases: jax.Array,
+        future_bases: jax.Array,
+        future_mask: jax.Array,
         key: jax.Array,
     ) -> jax.Array:
         """Forecast the next state's angles.
@@ -191,6 +288,8 @@ class TorusNeuralSDE(eqx.Module):
         context_angles: (T, d)
         context_bases:  (T, bases_per_state) int
         target_bases:   (bases_per_state,) int
+        future_bases:   (future_bases_window, bases_per_state) int
+        future_mask:    (future_bases_window,) int
         key:            PRNG key
         """
         y0 = wrap_to_pi(context_angles[-1])
@@ -201,6 +300,9 @@ class TorusNeuralSDE(eqx.Module):
         ctx_from_encoder = self.encoder(encoder_input)  # (ctx_dim - base_feat,)
         target_base_feat = encode_bases(target_bases)  # (bases_per_state * 4,)
         ctx = jnp.concatenate([ctx_from_encoder, target_base_feat])
+        if self.future_encoder is not None:
+            future_feat = self.future_encoder(future_bases, future_mask)
+            ctx = jnp.concatenate([ctx, future_feat])
 
         t1 = self.n_steps * self.dt
         brownian_path = VirtualBrownianTree(
@@ -236,7 +338,7 @@ class TorusNeuralSDE(eqx.Module):
             args=ctx,
             saveat=SaveAt(t1=True),
             adjoint=adjoint,
-            max_steps=self.n_steps + 8,
+            max_steps=self.n_steps + 1,
         )
 
         return wrap_to_pi(sol.ys[0])

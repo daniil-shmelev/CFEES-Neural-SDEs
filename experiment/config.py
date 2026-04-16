@@ -43,6 +43,13 @@ class ExperimentConfig:
     min_eigenvalue: float
     context_length: int = 20
     residues_per_state: int = 1
+    future_bases_window: int = 0
+    future_ctx_dim: int = 32
+    activation: str = "silu"
+    drift_depth: int = 3
+    diffusion_depth: int = 2
+    filter_canonical: bool = False
+    canonical_threshold: float = 1.0
     max_chains: int | None = None
     skip_plots: bool = False
 
@@ -65,6 +72,13 @@ def make_config(
     min_eigenvalue: float = 1e-6,
     context_length: int = 20,
     residues_per_state: int = 1,
+    future_bases_window: int = 0,
+    future_ctx_dim: int = 32,
+    activation: str = "silu",
+    drift_depth: int = 3,
+    diffusion_depth: int = 2,
+    filter_canonical: bool = False,
+    canonical_threshold: float = 1.0,
     max_chains: int | None = None,
     skip_plots: bool = False,
 ) -> ExperimentConfig:
@@ -85,6 +99,13 @@ def make_config(
         min_eigenvalue=min_eigenvalue,
         context_length=context_length,
         residues_per_state=residues_per_state,
+        future_bases_window=future_bases_window,
+        future_ctx_dim=future_ctx_dim,
+        activation=activation,
+        drift_depth=drift_depth,
+        diffusion_depth=diffusion_depth,
+        filter_canonical=filter_canonical,
+        canonical_threshold=canonical_threshold,
         max_chains=max_chains,
         skip_plots=skip_plots,
     )
@@ -111,6 +132,13 @@ def load_config(path: Path) -> ExperimentConfig:
         min_eigenvalue=data["min_eigenvalue"],
         context_length=data.get("context_length", 20),
         residues_per_state=data.get("residues_per_state", 1),
+        future_bases_window=data.get("future_bases_window", 0),
+        future_ctx_dim=data.get("future_ctx_dim", 32),
+        activation=data.get("activation", "silu"),
+        drift_depth=data.get("drift_depth", 3),
+        diffusion_depth=data.get("diffusion_depth", 2),
+        filter_canonical=data.get("filter_canonical", False),
+        canonical_threshold=data.get("canonical_threshold", 1.0),
         max_chains=None if raw_max_chains in (None, 0, -1) else int(raw_max_chains),
         skip_plots=data.get("skip_plots", False),
     )

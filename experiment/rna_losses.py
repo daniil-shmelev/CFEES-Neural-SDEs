@@ -24,17 +24,19 @@ def rna_predict_batch(
 ) -> jax.Array:
     """vmap the TorusNeuralSDE over the batch dimension.
 
-    Expects ``batch`` to contain ``context_angles``, ``context_bases``, and
-    ``target_bases``. Returns predicted angles of shape
-    ``(batch, num_angles)``.
+    Expects ``batch`` to contain ``context_angles``, ``context_bases``,
+    ``target_bases``, ``future_bases``, and ``future_mask``. Returns
+    predicted angles of shape ``(batch, num_angles)``.
     """
     context_angles = batch["context_angles"]
     context_bases = batch["context_bases"]
     target_bases = batch["target_bases"]
+    future_bases = batch["future_bases"]
+    future_mask = batch["future_mask"]
     sample_keys = jax.random.split(key, context_angles.shape[0])
     return jax.vmap(
-        lambda ca, cb, tb, k: model(ca, cb, tb, k)
-    )(context_angles, context_bases, target_bases, sample_keys)
+        lambda ca, cb, tb, fb, fm, k: model(ca, cb, tb, fb, fm, k)
+    )(context_angles, context_bases, target_bases, future_bases, future_mask, sample_keys)
 
 
 def make_wrapped_mse_loss(*, target_key: str = "target_angles") -> LossFn:

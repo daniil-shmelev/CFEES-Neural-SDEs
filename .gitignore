@@ -226,3 +226,13 @@ report/*.xdv
 report/*.fdb_latexmk
 report/*.fls
 report/*.synctex.gz
+*.aux
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.toc
+
+# Windows WSL Zone.Identifier files
+*:Zone.Identifier

@@ -116,6 +116,9 @@ def run(
     target_bases = jax.random.randint(
         jax.random.key(3), (batch_size, 1), minval=0, maxval=4
     )
+    # future_bases_window=0: future encoder is skipped, these are just stubs.
+    future_bases = jnp.zeros((batch_size, 0, 1), dtype=jnp.int32)
+    future_mask = jnp.zeros((batch_size, 0), dtype=jnp.int8)
     jax.block_until_ready(context_angles)
 
     gc.collect()
@@ -126,24 +129,39 @@ def run(
         ctx_a: jax.Array,
         ctx_b: jax.Array,
         tgt_b: jax.Array,
+        fut_b: jax.Array,
+        fut_m: jax.Array,
         k: jax.Array,
     ) -> jax.Array:
         sample_keys = jax.random.split(k, ctx_a.shape[0])
         preds = jax.vmap(
-            lambda a, cb, tb, sk: m(a, cb, tb, sk)
-        )(ctx_a, ctx_b, tgt_b, sample_keys)
+            lambda a, cb, tb, fb, fm, sk: m(a, cb, tb, fb, fm, sk)
+        )(ctx_a, ctx_b, tgt_b, fut_b, fut_m, sample_keys)
         return jnp.sum(preds**2)
 
     grad_fn = eqx.filter_jit(eqx.filter_value_and_grad(loss_fn))
     rep_keys = jax.random.split(jax.random.key(42), n_reps + 1)
 
     temp_bytes = _hlo_temp_bytes(
-        grad_fn, model, context_angles, context_bases, target_bases, rep_keys[0]
+        grad_fn,
+        model,
+        context_angles,
+        context_bases,
+        target_bases,
+        future_bases,
+        future_mask,
+        rep_keys[0],
     )
 
     t0 = time.time()
     loss, grads = grad_fn(
-        model, context_angles, context_bases, target_bases, rep_keys[0]
+        model,
+        context_angles,
+        context_bases,
+        target_bases,
+        future_bases,
+        future_mask,
+        rep_keys[0],
     )
     jax.block_until_ready((loss, grads))
     t_warmup = time.time() - t0
@@ -156,7 +174,13 @@ def run(
     for i in range(n_reps):
         t0 = time.time()
         loss, grads = grad_fn(
-            model, context_angles, context_bases, target_bases, rep_keys[i + 1]
+            model,
+            context_angles,
+            context_bases,
+            target_bases,
+            future_bases,
+            future_mask,
+            rep_keys[i + 1],
         )
         jax.block_until_ready((loss, grads))
         times.append(time.time() - t0)
