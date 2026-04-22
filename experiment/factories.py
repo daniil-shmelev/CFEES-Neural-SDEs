@@ -4,7 +4,13 @@ import equinox as eqx
 import jax
 from cyreal.loader import DataLoader
 from cyreal.transforms import BatchTransform
-from diffrax import AbstractSolver
+from diffrax import (
+    AbstractAdjoint,
+    AbstractSolver,
+    DirectAdjoint,
+    RecursiveCheckpointAdjoint,
+    ReversibleAdjoint,
+)
 from georax import CFEES25, CFEES27, CG2, CG4, RKMK
 
 from experiment.config import ExperimentConfig, Experiments, Solvers
@@ -21,6 +27,40 @@ _SOLVER_CLASSES: dict[Solvers, type[AbstractSolver]] = {
 def build_solver(name: Solvers) -> AbstractSolver:
     cls = _SOLVER_CLASSES[name]
     return cls()
+
+
+def build_adjoint(name: str | None, n_steps: int) -> AbstractAdjoint | None:
+    """Map an adjoint-name string to a diffrax adjoint instance.
+
+    Mirrors ``experiment.integrator_benchmark_single.build_adjoint`` so that
+    benchmark cells and training runs use the same logic.
+
+      - ``"auto"`` / ``None``: return ``None`` so the model picks
+        ``ReversibleAdjoint`` for reversible solvers and ``DirectAdjoint``
+        otherwise.
+      - ``"reversible"``: ``ReversibleAdjoint()``.
+      - ``"direct"``: ``DirectAdjoint()``.
+      - ``"checkpoint_recursive"`` (aka ``"checkpoint_log"``):
+        ``RecursiveCheckpointAdjoint()`` with diffrax's default Stumm-Walther
+        online binomial treeverse (O(sqrt(n_steps)) checkpoints).
+      - ``"checkpoint_full"``: ``RecursiveCheckpointAdjoint(checkpoints=n_steps+8)``,
+        i.e. one snapshot per step (O(n_steps) tape).
+    """
+    if name is None:
+        return None
+    name = name.lower()
+    max_steps = n_steps + 8
+    if name == "auto":
+        return None
+    if name == "reversible":
+        return ReversibleAdjoint()
+    if name == "direct":
+        return DirectAdjoint()
+    if name in ("checkpoint_recursive", "recursive", "checkpoint_log"):
+        return RecursiveCheckpointAdjoint()
+    if name in ("checkpoint_full", "full"):
+        return RecursiveCheckpointAdjoint(checkpoints=max_steps)
+    raise ValueError(f"unknown adjoint {name!r}")
 
 
 def make_loader(
@@ -102,6 +142,7 @@ def make_model(
                 activation=config.activation,
                 drift_depth=config.drift_depth,
                 diffusion_depth=config.diffusion_depth,
+                adjoint=build_adjoint(config.adjoint, config.n_steps),
                 key=key,
             )
         case _:

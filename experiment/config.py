@@ -52,6 +52,11 @@ class ExperimentConfig:
     canonical_threshold: float = 1.0
     max_chains: int | None = None
     skip_plots: bool = False
+    adjoint: str = "auto"
+    """Diffrax adjoint: auto | reversible | direct | checkpoint_recursive
+    (aka checkpoint_log) | checkpoint_full.  ``auto`` preserves the historical
+    behaviour of picking ReversibleAdjoint for reversible solvers and
+    DirectAdjoint otherwise."""
 
 
 def make_config(
@@ -81,6 +86,7 @@ def make_config(
     canonical_threshold: float = 1.0,
     max_chains: int | None = None,
     skip_plots: bool = False,
+    adjoint: str = "auto",
 ) -> ExperimentConfig:
     return ExperimentConfig(
         experiment=experiment,
@@ -108,6 +114,7 @@ def make_config(
         canonical_threshold=canonical_threshold,
         max_chains=max_chains,
         skip_plots=skip_plots,
+        adjoint=adjoint,
     )
 
 
@@ -141,6 +148,7 @@ def load_config(path: Path) -> ExperimentConfig:
         canonical_threshold=data.get("canonical_threshold", 1.0),
         max_chains=None if raw_max_chains in (None, 0, -1) else int(raw_max_chains),
         skip_plots=data.get("skip_plots", False),
+        adjoint=data.get("adjoint", "auto"),
     )
 
 

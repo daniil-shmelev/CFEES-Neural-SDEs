@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import time
 from pathlib import Path
 from typing import Any
 
@@ -193,6 +194,8 @@ def _override_from_args(config: ExperimentConfig, args: argparse.Namespace) -> E
         overrides["max_chains"] = int(args.max_chains) if args.max_chains > 0 else None
     if args.seed is not None:
         overrides["seed"] = int(args.seed)
+    if args.adjoint is not None:
+        overrides["adjoint"] = str(args.adjoint)
     if not overrides:
         return config
     return dataclasses.replace(config, **overrides)
@@ -209,6 +212,24 @@ def main() -> int:
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--max-chains", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--adjoint",
+        type=str,
+        default=None,
+        choices=(
+            "auto",
+            "reversible",
+            "direct",
+            "checkpoint_recursive",
+            "checkpoint_log",  # deprecated alias
+            "checkpoint_full",
+        ),
+        help=(
+            "Override ExperimentConfig.adjoint. 'auto' preserves historical "
+            "behaviour; 'reversible', 'checkpoint_recursive', 'checkpoint_full' "
+            "pin a specific diffrax adjoint so the retrain isolates its effect."
+        ),
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -252,6 +273,7 @@ def main() -> int:
         flush=True,
     )
 
+    train_t0 = time.time()
     best_model, history = fit(
         model,
         loss_fn=loss_fn,
@@ -259,6 +281,7 @@ def main() -> int:
         val_metric_fn=metric_fn,
         val_metric_name="val_wrapped_mae",
     )
+    train_walltime_s = float(time.time() - train_t0)
 
     test_loss = evaluate(best_model, loss_fn=loss_fn, config=config, seed_offset=1)
     predicted, actual = predict_dataset(
@@ -283,12 +306,18 @@ def main() -> int:
             "test_loss": float(test_loss),
             "test_wrapped_mae": float(test_mae),
             "solver": config.solver.value,
+            "adjoint": str(config.adjoint),
+            "seed": int(config.seed),
             "n_steps": int(config.n_steps),
             "residues_per_state": int(config.residues_per_state),
             "num_angles": int(metadata["num_angles"]),
             "batch_size": int(config.batch_size),
             "epochs": int(config.epochs),
             "n_train": int(len(train_dataset)),
+            "learning_rate": float(config.learning_rate),
+            "dt": float(config.dt),
+            "hidden_dim": int(config.hidden_dim),
+            "train_walltime_s": train_walltime_s,
         },
     )
 

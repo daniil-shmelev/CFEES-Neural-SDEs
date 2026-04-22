@@ -40,6 +40,7 @@ def run_subprocess(
     ctx_dim: int,
     dt: float,
     batch_size: int,
+    ref_grad: str | None = None,
 ) -> dict:
     cmd = [
         python_bin,
@@ -56,6 +57,8 @@ def run_subprocess(
         "--dt", str(dt),
         "--batch-size", str(batch_size),
     ]
+    if ref_grad is not None:
+        cmd.extend(["--ref-grad", ref_grad])
     proc = subprocess.run(
         cmd,
         cwd=str(PROJECT_ROOT),
@@ -97,25 +100,49 @@ def main() -> int:
     parser.add_argument(
         "--modes",
         nargs="+",
-        default=["cfees25:reversible", "cg2:checkpoint_full", "cg2:auto"],
+        default=[
+            "cfees25:reversible",
+            "cg2:checkpoint_full",
+            "cg2:checkpoint_recursive",
+            "cg4:checkpoint_full",
+            "cg4:checkpoint_recursive",
+        ],
         help=(
             "Space-separated list of `solver:adjoint` combinations. Each is run "
             "as its own subprocess cell. Adjoint names match "
             "integrator_benchmark_single --adjoint: auto, reversible, direct, "
-            "checkpoint_log, checkpoint_full."
+            "checkpoint_recursive (aka checkpoint_log), checkpoint_full."
         ),
     )
     parser.add_argument("--n-reps", type=int, default=10)
     parser.add_argument("--context-length", type=int, default=20)
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--ctx-dim", type=int, default=64)
-    parser.add_argument("--dt", type=float, default=0.05)
+    parser.add_argument("--dt", type=float, default=0.05,
+                        help="Per-step dt (fixed across n_steps). Mutually "
+                             "exclusive with --t1.")
+    parser.add_argument("--t1", type=float, default=None,
+                        help="If set, integrate to fixed final time t1 with "
+                             "dt=t1/n_steps per cell. Required for the "
+                             "gradient-vs-reference comparison to be "
+                             "meaningful (all cells solve the same SDE on "
+                             "[0, t1]).")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--python", type=str, default=sys.executable)
     parser.add_argument(
         "--output",
         type=Path,
-        default=PROJECT_ROOT / "results" / "rna_integrator_benchmark.json",
+        default=PROJECT_ROOT / "results" / "rna_benchmark_scaling.json",
+    )
+    parser.add_argument(
+        "--ref-grad",
+        type=str,
+        default=None,
+        help=(
+            "Optional .npy path to a reference gradient. Pass through to each "
+            "cell so it records rel_err_vs_ref / cos_sim_vs_ref. Use "
+            "scripts/compute_reference_gradient.py to produce this file."
+        ),
     )
     args = parser.parse_args()
 
@@ -131,9 +158,10 @@ def main() -> int:
 
     results: Dict[str, dict] = {}
     for num_angles, n_steps in config_pairs:
+        cell_dt = (args.t1 / n_steps) if args.t1 is not None else args.dt
         for solver, adjoint in modes:
             key = f"{solver}-{adjoint}_d{num_angles}_n{n_steps}"
-            print(f"[isolated] {key} ...", end="", flush=True)
+            print(f"[isolated] {key} dt={cell_dt:.3e} ...", end="", flush=True)
             try:
                 r = run_subprocess(
                     num_angles,
@@ -145,8 +173,9 @@ def main() -> int:
                     context_length=args.context_length,
                     hidden_dim=args.hidden_dim,
                     ctx_dim=args.ctx_dim,
-                    dt=args.dt,
+                    dt=cell_dt,
                     batch_size=args.batch_size,
+                    ref_grad=args.ref_grad,
                 )
                 results[key] = r
                 temp_mb = (r.get("temp_bytes") or 0) / (1 << 20)
